@@ -77,6 +77,10 @@ watched_paths:
 
 sync:
   metadata_interval: 1200  # seconds (20 minutes) — attach cadence
+  # Scan everything once at startup rather than trusting the stored
+  # per-tier timestamps. The daemon was down for an unknown length of
+  # time, so what is on disk now is unknown.
+  rescan_on_start: true
 
 log_level: "info"
 # state_db: "state.db"  # defaults to alongside the package/executable
@@ -416,6 +420,14 @@ class SyncConfig(BaseModel):
     """Timing configuration for sync loops."""
 
     metadata_interval: int = 1200
+    rescan_on_start: bool = Field(
+        True,
+        description=(
+            "Run one full (cold) scan of each watched path on startup, "
+            "regardless of when the last one ran. Set false on a very large "
+            "tree where the walk is expensive and a restart is routine."
+        ),
+    )
 
 
 class DatalabConfig(BaseModel):
