@@ -471,6 +471,15 @@ class BeholderConfig(BaseModel):
     sync: SyncConfig = SyncConfig()
     log_level: str = "info"
     state_db: Path = DEFAULT_STATE_DB_PATH
+    # --- lightningtree fork: status dashboard ---
+    status_port: int = Field(
+        8477,
+        description=(
+            "Port for the read-only status dashboard on 127.0.0.1. Set 0 to "
+            "disable. Loopback only; it is not reachable from off the machine."
+        ),
+    )
+    # --- end fork ---
 
     @model_validator(mode="before")
     @classmethod

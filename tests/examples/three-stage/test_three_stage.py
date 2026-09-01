@@ -195,6 +195,7 @@ def _build_daemon(
     config_path.write_text(yaml.safe_dump(src))
 
     config = load_config(config_path)
+    config.status_port = 0  # no dashboard: don't bind a real port in a test
     daemon = BeholderDaemon(config)
     for client in daemon.clients.values():
         client._session = httpx.Client(

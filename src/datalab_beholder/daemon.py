@@ -83,6 +83,9 @@ class BeholderDaemon:
         # Watched paths still owed their startup scan; see `setup`.
         self._pending_full_scan: set[str] = set()
         self._last_heartbeat_mono: float = float("-inf")
+        # --- lightningtree fork: status dashboard ---
+        self._status_server: Any = None
+        # --- end fork ---
 
     @property
     def config(self) -> BeholderConfig:
@@ -200,6 +203,10 @@ class BeholderDaemon:
         except Exception:  # pragma: no cover
             log.debug("could not write daemon_state", exc_info=True)
 
+        # --- lightningtree fork: status dashboard ---
+        self._start_status_server()
+        # --- end fork ---
+
         self._running = True
 
     def tick(self) -> None:
@@ -289,9 +296,45 @@ class BeholderDaemon:
         finally:
             self.shutdown()
 
+    # --- lightningtree fork: status dashboard ---
+    def _start_status_server(self) -> None:
+        """Serve the read-only dashboard on loopback, if configured.
+
+        The snapshot callable opens its own read-only connection each time:
+        sqlite3 connections belong to the thread that made them, and the
+        server answers on its own threads. Reading the database rather than
+        this object's attributes is also what lets the page work when the
+        daemon is not running.
+        """
+        # The GUI reloads its config from disk when it starts the daemon,
+        # so a --status-port given to `beholder gui` reaches us here
+        # rather than through the config object.
+        override = os.environ.get("BEHOLDER_STATUS_PORT")
+        port = (
+            int(override)
+            if override and override.isdigit()
+            else getattr(self._config, "status_port", 0)
+        )
+        if not port or self._status_server is not None:
+            return
+        from datalab_beholder.server import StatusServer
+        from datalab_beholder.status import collect_status
+
+        server = StatusServer(
+            lambda: collect_status(self._config), port=int(port)
+        )
+        if server.start():
+            self._status_server = server
+
+    # --- end fork ---
+
     def shutdown(self) -> None:
-        """Release resources. (No background threads to stop in the
-        scan-based design.)"""
+        """Release resources."""
+        # --- lightningtree fork: status dashboard ---
+        if self._status_server is not None:
+            self._status_server.stop()
+            self._status_server = None
+        # --- end fork ---
         self._state.close()
         log.info("Daemon stopped.")
 

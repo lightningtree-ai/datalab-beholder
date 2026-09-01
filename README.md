@@ -169,6 +169,76 @@ Launches a small Tkinter status GUI showing connection state per configured data
 datalab-beholder gui [--config PATH]
 ```
 
+### `datalab-beholder dashboard`
+
+Serve the status page against an existing state database, with no daemon
+running. Use it on a `state.db` copied off an instrument PC, or on one left
+behind by a daemon that has stopped.
+
+```
+datalab-beholder dashboard [--config PATH] [--state-db PATH] [--port N]
+```
+
+With no `--config` it reads the database on its own; the watched-path
+locations and scan intervals come from the config, so without one those
+fields are reported as null.
+
+## Status dashboard
+
+While the daemon runs it serves a read-only status page on
+`http://127.0.0.1:8477/`. It answers the question `datalab-beholder status`
+cannot: whether the pending files are moving or wedged, and if wedged, why.
+
+The page shows, per watched path, the counts by status, when each scan tier
+last ran and when it is next due, when the last upload landed, and every file
+that is failing with its attempt count, its error, and when it will be tried
+again. The header carries the daemon's version, host, pid, uptime and the
+time until the next upload pass.
+
+Set `status_port: 0` in the config, or pass `--status-port 0`, to turn it off.
+The socket is bound to `127.0.0.1` and there is no option to bind anything
+else, so it is not reachable from another machine and carries no
+authentication. It never includes an API key.
+
+Everything on the page comes from `/api/status` as JSON, which is the
+supported way to read a running beholder from anything else:
+
+```
+$ curl -s http://127.0.0.1:8477/api/status
+{
+  "daemon": {
+    "running": true,
+    "version": "0.1.0rc6",
+    "sync_status": "idle",
+    "seconds_to_next_attach": 659.7631480693817
+  },
+  "watched_paths": [
+    {
+      "name": "sycamore",
+      "pending": 3,
+      "stuck": 3,
+      "problems": [
+        {
+          "path": "CEL-9997_127.0.0.1-BTS85-253-1-3-12.ndax",
+          "attempts": 9,
+          "last_error": "HTTP 304 error at https://datalab.lightningtree.ai/api/upload-file/: b''"
+        }
+      ]
+    }
+  ]
+}
+```
+
+The response carries a `schema_version`, currently `1`. Keys get added without
+bumping it; a key that changes meaning or disappears bumps it.
+
+Everything is read out of `state.db` over a read-only connection rather than
+from the running daemon, which is why `datalab-beholder dashboard` can serve a
+database with no daemon attached. A database written before this version has
+no failure-tracking columns, and a read-only reader cannot add them; the page
+says so instead of showing an empty problems list. Start the daemon on it once
+to upgrade it in place.
+
 ## Standalone executable (PyInstaller)
 
 For deployment onto instrument PCs without a Python install, a single-file executable can be built with [PyInstaller](https://pyinstaller.org/) using the bundled `beholder.spec`:
@@ -205,6 +275,7 @@ PyInstaller does not cross-compile — a Windows binary must be built on Windows
 | `sync` | `metadata_interval` | `1200` | Seconds between attach passes |
 | | `log_level` | `info` | Logging verbosity |
 | | `state_db` | next to package/exe | Path to the local SQLite database |
+| | `status_port` | `8477` | Port for the read-only status dashboard on `127.0.0.1`; `0` disables it |
 
 ## Roadmap
 

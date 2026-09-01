@@ -60,6 +60,10 @@ class TestBeholderDaemon:
         daemon.sync_status = "idle"
         # Normally set by setup(); these tests drive the daemon without it.
         daemon._pending_full_scan = set()
+        daemon._last_heartbeat_mono = float("-inf")
+        # No dashboard in tests: it would bind a real port on every setup().
+        daemon._status_server = None
+        config.status_port = 0
 
         return daemon
 

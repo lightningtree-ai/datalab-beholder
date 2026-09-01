@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import os
 import sys
 from pathlib import Path
 
@@ -191,7 +192,15 @@ def scan(
     default=None,
     help="Override log level from config.",
 )
-def start(config_path: Path | None, log_level: str | None) -> None:
+@click.option(
+    "--status-port",
+    type=int,
+    default=None,
+    help="Port for the read-only status dashboard on 127.0.0.1 (0 disables).",
+)
+def start(
+    config_path: Path | None, log_level: str | None, status_port: int | None
+) -> None:
     """Start the beholder daemon."""
     from datalab_beholder.config import load_config
     from datalab_beholder.daemon import BeholderDaemon
@@ -199,6 +208,8 @@ def start(config_path: Path | None, log_level: str | None) -> None:
     config = load_config(config_path)
     if log_level:
         config.log_level = log_level
+    if status_port is not None:
+        config.status_port = status_port
 
     _setup_logging(config.log_level, logfile=config.state_db.parent / "beholder.log")
 
@@ -293,7 +304,15 @@ def dry_run(config_path: Path | None, log_level: str | None) -> None:
     default=None,
     help="Override log level from config.",
 )
-def gui(config_path: Path | None, log_level: str | None) -> None:
+@click.option(
+    "--status-port",
+    type=int,
+    default=None,
+    help="Port for the read-only status dashboard on 127.0.0.1 (0 disables).",
+)
+def gui(
+    config_path: Path | None, log_level: str | None, status_port: int | None
+) -> None:
     """Launch the beholder GUI."""
     try:
         from datalab_beholder.gui import BeholderGUI
@@ -309,6 +328,9 @@ def gui(config_path: Path | None, log_level: str | None) -> None:
     # the logfile at least as much as `start` does. Without it there was no
     # beholder.log to look at when something went wrong.
     from datalab_beholder.config import load_config
+
+    if status_port is not None:
+        os.environ["BEHOLDER_STATUS_PORT"] = str(status_port)
 
     try:
         logfile = load_config(config_path).state_db.parent / "beholder.log"
@@ -369,3 +391,70 @@ def status(config_path: Path | None) -> None:
             click.echo(f"  Pending changes: {len(pending)}")
     finally:
         state.close()
+
+
+# --- lightningtree fork: status dashboard ---
+@main.command()
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to config file. Default: config.yaml alongside the package/executable",
+)
+@click.option(
+    "--state-db",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="State database to read. Default: the one named in the config.",
+)
+@click.option(
+    "--port", type=int, default=None, help="Port to serve on (127.0.0.1)."
+)
+def dashboard(
+    config_path: Path | None, state_db: Path | None, port: int | None
+) -> None:
+    """Serve the status dashboard against an existing state database.
+
+    The daemon serves the same page itself while it runs. This is for
+    looking at a database with no daemon attached: one copied off an
+    instrument PC, or one left behind by a daemon that has stopped.
+    """
+    from datalab_beholder.config import load_config
+    from datalab_beholder.server import DEFAULT_PORT, StatusServer
+    from datalab_beholder.status import collect_status
+
+    _setup_logging("info")
+
+    config = None
+    try:
+        config = load_config(config_path)
+    except Exception as e:
+        if state_db is None:
+            raise click.ClickException(
+                f"no usable config ({e}); pass --state-db to read a database "
+                "directly"
+            )
+        click.echo(f"No config loaded ({e}); reading {state_db} on its own.")
+
+    db = state_db or (config.state_db if config else None)
+    if db is None:
+        raise click.ClickException("nothing to read: pass --config or --state-db")
+    if not Path(db).exists():
+        raise click.ClickException(f"state database not found: {db}")
+
+    server = StatusServer(
+        lambda: collect_status(config, db), port=port or DEFAULT_PORT
+    )
+    if not server.start(background=False):
+        raise click.ClickException("could not bind the dashboard port")
+    click.echo(f"Serving {db} at {server.url}  (ctrl-c to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        click.echo("\nStopped.")
+    finally:
+        server.stop()
+
+
+# --- end fork ---
