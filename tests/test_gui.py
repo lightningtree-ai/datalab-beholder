@@ -74,3 +74,31 @@ class TestBeholderGUI:
 
         assert app.winfo_exists()
         app.destroy()
+
+
+class TestTextWidgetHandlerNeverRaises:
+    """A logging handler runs on whatever thread emitted the record."""
+
+    def test_a_record_logged_off_the_tk_main_loop_is_dropped_not_raised(
+        self,
+    ) -> None:
+        """Tk raises a bare `RuntimeError` when touched from another thread.
+
+        The GUI attaches this handler to the root logger, so once the status
+        server (or any other background thread) logs something, that
+        exception used to propagate into the thread that logged. On Windows
+        it cost a dashboard request its response.
+        """
+        import logging
+
+        from datalab_beholder.gui import TextWidgetHandler
+
+        class OffMainLoop:
+            def configure(self, **kwargs: object) -> None:
+                raise RuntimeError("main thread is not in main loop")
+
+        handler = TextWidgetHandler(OffMainLoop())  # type: ignore[arg-type]
+        record = logging.LogRecord(
+            "test", logging.ERROR, __file__, 1, "boom", None, None
+        )
+        handler.emit(record)  # must not raise

@@ -333,7 +333,12 @@ class BeholderDaemon:
             self._status_server.stop()
             self._status_server = None
         # --- end fork ---
-        self._state.close()
+        # `start()` calls this from a `finally`, so it must not raise: an
+        # exception here would replace whatever ended the loop.
+        try:
+            self._state.close()
+        except Exception:  # pragma: no cover
+            log.debug("could not close the state database", exc_info=True)
         log.info("Daemon stopped.")
 
     def stop(self) -> None:

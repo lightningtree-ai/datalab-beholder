@@ -82,8 +82,14 @@ class TextWidgetHandler(logging.Handler):
             self._text.insert("end", msg)
             self._text.see("end")
             self._text.configure(state="disabled")
-        except tk.TclError:
-            pass  # widget destroyed
+        except (tk.TclError, RuntimeError):
+            # A logging handler is called from whatever thread emitted the
+            # record and must never raise, or it takes that thread's caller
+            # down with it. Tk rejects calls from outside its main loop with
+            # a bare RuntimeError, which is what a background thread (the
+            # status server) gets. TclError means the widget is gone. Either
+            # way the record still reaches the logfile.
+            pass
 
 
 # -- Main GUI ----------------------------------------------------------------
