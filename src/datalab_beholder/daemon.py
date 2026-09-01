@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
+import platform
 import signal
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from datalab_beholder import __version__
 from datalab_beholder.client import BeholderClient
 from datalab_beholder.config import BeholderConfig, LocalWatchedPath
 from datalab_beholder.state import StateStore
@@ -134,7 +137,14 @@ class BeholderDaemon:
         appropriate scan tier per watched path based on its registry
         timestamps (which start out NULL → "infinitely stale" → run now).
         """
-        log.info("Starting beholder daemon (id=%s)", self._daemon_id)
+        log.info(
+            "Starting beholder daemon (id=%s) version %s on %s, pid %d",
+            self._daemon_id,
+            __version__,
+            platform.platform(terse=True),
+            os.getpid(),
+        )
+        log.info("State database: %s", self._config.state_db)
         log.info(
             "Watching %d path(s): %s",
             len(self._config.watched_paths),
@@ -163,6 +173,7 @@ class BeholderDaemon:
         """
         now_mono = time.monotonic()
         now_wall = time.time()
+        failed = False
 
         for wp in self._config.watched_paths:
             try:
@@ -179,18 +190,23 @@ class BeholderDaemon:
                 log.debug("Scan kind %s not implemented for %s", kind, wp.name)
             except Exception:
                 log.exception("Error running %s scan for %s", kind, wp.name)
-                self.sync_status = "error"
+                failed = True
 
         if now_mono - self._last_attach_mono >= self._config.sync.metadata_interval:
             self.sync_status = "attaching"
             try:
                 self._attach_matched_files()
                 self.last_attach_time = now_wall
-                self.sync_status = "idle"
             except Exception:
                 log.exception("Error in attach loop")
-                self.sync_status = "error"
+                failed = True
             self._last_attach_mono = now_mono
+
+        # Derived from this tick rather than latched. A scan failure used to
+        # set "error" with nothing but a later *successful attach pass* able
+        # to clear it, so a single transient hiccup showed as an error for up
+        # to metadata_interval -- twenty minutes on the default cadence.
+        self.sync_status = "error" if failed else "idle"
 
         self._update_pending_count()
 
@@ -207,8 +223,9 @@ class BeholderDaemon:
             self.shutdown()
 
     def shutdown(self) -> None:
-        """Clean up resources. (No background threads to stop in the
-        scan-based design — this is here for symmetry with start().)"""
+        """Release resources. (No background threads to stop in the
+        scan-based design.)"""
+        self._state.close()
         log.info("Daemon stopped.")
 
     def stop(self) -> None:

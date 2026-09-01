@@ -177,7 +177,7 @@ For deployment onto instrument PCs without a Python install, a single-file execu
 uv run pyinstaller beholder.spec
 ```
 
-The resulting binary in `dist/` launches the GUI and reads `config.yaml` from the directory next to the executable. Pre-built Windows binaries are produced by the project's CI workflow.
+Run with no subcommand, the resulting binary in `dist/` starts the daemon (`start`), reading `config.yaml` from the directory next to the executable; pass `gui` for the windowed control panel. Pre-built Windows binaries are produced by the project's CI workflow.
 
 PyInstaller does not cross-compile — a Windows binary must be built on Windows. To build binaries for an arbitrary commit without tagging a release, trigger the CI workflow manually (Actions → CI → *Run workflow*, or `gh workflow run ci.yml --ref main -f ref=<sha>`); manual runs upload the Linux/Windows/macOS binaries as downloadable workflow artifacts.
 
@@ -216,12 +216,12 @@ Other things on the list:
 
 - **SSH and cloud-storage watched paths.** The config schema already discriminates on `kind` (`local` / `ssh` / `cloud`); only `local` is implemented today.
 
-Issues and design discussion welcome — file them at [github.com/datalab-org/datalab-beholder/issues](https://github.com/datalab-org/datalab-beholder/issues).
+Issues and design discussion welcome — file them at [github.com/datalab-industries/datalab-beholder/issues](https://github.com/datalab-industries/datalab-beholder/issues).
 
 ## Development
 
 ```
-git clone https://github.com/datalab-org/datalab-beholder.git
+git clone https://github.com/datalab-industries/datalab-beholder.git
 cd datalab-beholder
 uv sync
 uv run pytest -v

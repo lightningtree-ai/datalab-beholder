@@ -956,3 +956,44 @@ class TestMultiDatalabRouting:
             "https://north.example.org",
             "https://south.example.org",
         ]
+
+
+class TestSyncStatus:
+    def test_sync_status_reflects_the_current_tick(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`sync_status` was assigned at three points that did not agree, so
+        it tracked neither the scan nor the attach reliably.
+
+        A scan failure set "error", but only a *successful attach pass*
+        cleared it — so a transient hiccup could show as an error for up to
+        `metadata_interval` (twenty minutes on the default cadence), while
+        an attach pass in the same tick could equally mask a scan that had
+        just failed. It is now derived once, at the end of the tick, from
+        what actually happened in it.
+        """
+        root = tmp_path / "data"
+        root.mkdir()
+        (root / "42-cell-formation.mpr").write_bytes(b"\x00" * 16)
+        config = _attach_config(tmp_path, root)
+        # Never attach, so only the scan path can move the status.
+        config.sync.metadata_interval = 10_000
+        helper = TestBeholderDaemon()
+        daemon = helper._make_daemon(config, MockTransport(), monkeypatch)
+        daemon.setup()
+
+        boom = {"fail": True}
+        real_run_scan = daemon._run_scan
+
+        def flaky(wp, kind):
+            if boom["fail"]:
+                raise OSError("transient share dropout")
+            return real_run_scan(wp, kind)
+
+        daemon._run_scan = flaky  # type: ignore[method-assign]
+        daemon.tick()
+        assert daemon.sync_status == "error"
+
+        boom["fail"] = False
+        daemon.tick()
+        assert daemon.sync_status == "idle"
