@@ -58,6 +58,8 @@ class TestBeholderDaemon:
         daemon.last_attach_time = None
         daemon.pending_count = 0
         daemon.sync_status = "idle"
+        # Normally set by setup(); these tests drive the daemon without it.
+        daemon._pending_full_scan = set()
 
         return daemon
 
@@ -1033,3 +1035,92 @@ class TestMultiDatalabRouting:
             "https://north.example.org",
             "https://south.example.org",
         ]
+
+
+class TestRescanOnStart:
+    """A restart must not trust the stored per-tier scan timestamps."""
+
+    def _daemon(self, tmp_path: Path, root: Path, monkeypatch):
+        config = _attach_config(tmp_path, root)
+        # Stock cadence, so nothing is due purely on elapsed time.
+        config.watched_paths[0].scan.hot_interval = 60
+        config.watched_paths[0].scan.warm_interval = 3600
+        config.watched_paths[0].scan.cold_interval = 86400
+        helper = TestBeholderDaemon()
+        return config, helper._make_daemon(config, MockTransport(), monkeypatch)
+
+    def test_a_file_added_while_down_is_found_on_the_first_tick(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        root = tmp_path / "data"
+        root.mkdir()
+        config, daemon = self._daemon(tmp_path, root, monkeypatch)
+        wp = config.watched_paths[0]
+
+        # A cold scan completed ten minutes before the restart, so on the
+        # stored timestamps only the hot tier is due — and the hot tier only
+        # re-stats files already known, so it can never find a new one.
+        daemon._state.update_scan_timestamp("cells", "cold", time.time() - 600)
+        (root / "42-cell-formation.mpr").write_bytes(b"\x00" * 16)
+
+        daemon.setup()
+        assert daemon._select_scan_tier(wp, time.time()) == "cold"
+
+        daemon._run_scan(wp, "cold")
+        found = {e.path for e in daemon._state.get_pending_changes("cells")}
+        assert "42-cell-formation.mpr" in found
+
+    def test_each_watched_path_gets_its_own_startup_scan(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`tick` runs at most one tier per path per iteration, so a single
+        flag would be cleared by the first path and skip the rest."""
+        root = tmp_path / "data"
+        root.mkdir()
+        config, daemon = self._daemon(tmp_path, root, monkeypatch)
+        wp = config.watched_paths[0]
+
+        second = config.watched_paths[0].model_copy(update={"name": "cells-2"})
+        config.watched_paths.append(second)
+        daemon._state.register_watched_path("cells-2")
+
+        # Both paths were fully scanned a moment ago, so on the stored
+        # timestamps alone neither has any tier due.
+        now = time.time()
+        for name in ("cells", "cells-2"):
+            daemon._state.update_scan_timestamp(name, "cold", now)
+        assert daemon._select_scan_tier(wp, now) is None
+        assert daemon._select_scan_tier(second, now) is None
+
+        daemon.setup()
+
+        assert daemon._select_scan_tier(wp, now) == "cold"
+        assert daemon._select_scan_tier(second, now) == "cold"
+        # ...and only once each.
+        assert daemon._select_scan_tier(wp, now) is None
+        assert daemon._select_scan_tier(second, now) is None
+
+    def test_can_be_switched_off(self, tmp_path: Path, monkeypatch) -> None:
+        root = tmp_path / "data"
+        root.mkdir()
+        config, daemon = self._daemon(tmp_path, root, monkeypatch)
+        config.sync.rescan_on_start = False
+        wp = config.watched_paths[0]
+
+        daemon._state.update_scan_timestamp("cells", "cold", time.time() - 600)
+        daemon.setup()
+
+        assert daemon._select_scan_tier(wp, time.time()) == "hot"
+
+    def test_degrades_to_warm_when_cold_is_disabled(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`cold_interval: null` is chosen to avoid full walks; honour it."""
+        root = tmp_path / "data"
+        root.mkdir()
+        config, daemon = self._daemon(tmp_path, root, monkeypatch)
+        wp = config.watched_paths[0]
+        wp.scan.cold_interval = None
+
+        daemon.setup()
+        assert daemon._select_scan_tier(wp, time.time()) == "warm"

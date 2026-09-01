@@ -75,6 +75,9 @@ class BeholderDaemon:
         self.pending_count: int = 0
         self.sync_status: str = "idle"  # "idle" | "attaching" | "error"
 
+        # Watched paths still owed their startup scan; see `setup`.
+        self._pending_full_scan: set[str] = set()
+
     @property
     def config(self) -> BeholderConfig:
         return self._config
@@ -152,6 +155,26 @@ class BeholderDaemon:
         self._last_attach_mono = (
             time.monotonic() - self._config.sync.metadata_interval
         )  # so attach runs on the first tick
+
+        # The stored per-tier timestamps answer "when did a scan last
+        # finish", but after a restart the question is "does state still
+        # match the disk", and the daemon was down for an unmeasured
+        # interval during which files could be created, appended or
+        # removed with nobody watching. The tiered cadence assumes
+        # continuous observation, and a restart is the one moment that
+        # assumption does not hold. Without this, a file added while the
+        # daemon was down waits for the next warm or cold scan — up to 24
+        # hours on the default cadence — and restarting, which is the
+        # first thing anyone tries when sync looks stuck, does not help.
+        #
+        # A set rather than a flag: `tick` runs at most one tier per
+        # watched path per iteration, so a single flag cleared by the
+        # first path would silently skip every other one.
+        if self._config.sync.rescan_on_start:
+            self._pending_full_scan = {wp.name for wp in self._config.watched_paths}
+        else:
+            self._pending_full_scan = set()
+
         self._running = True
 
     def tick(self) -> None:
@@ -232,6 +255,13 @@ class BeholderDaemon:
         warm supersedes hot (the higher-tier scan does the work of the
         lower ones, which is reflected in `update_scan_timestamp`).
         """
+        if wp.name in self._pending_full_scan:
+            self._pending_full_scan.discard(wp.name)
+            # Degrade to warm where cold is disabled: `cold_interval: null`
+            # is chosen for write-once archives where a full walk is the
+            # thing being avoided.
+            return "cold" if wp.scan.cold_interval is not None else "warm"
+
         ts = self._state.get_scan_timestamps(wp.name)
 
         cold_interval = wp.scan.cold_interval
