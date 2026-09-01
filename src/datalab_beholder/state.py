@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
 
+from datalab_beholder import state_schema
 from datalab_beholder.scanner import FileEntry, ScanResult, WarmScanResult
 
 log = logging.getLogger(__name__)
@@ -155,8 +156,17 @@ class StateStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
+        # WAL lets a reader (the status dashboard, `status`, a dry run) work
+        # while the daemon writes, instead of the two blocking each other.
+        # It is a property of the file, so every later reader inherits it.
+        # Some network shares refuse it; carry on with the default journal.
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:  # pragma: no cover - filesystem-dependent
+            pass
         self._conn.executescript(REGISTRY_SCHEMA)
         self._wipe_legacy_files_table()
+        state_schema.migrate(self._conn)
 
     def close(self) -> None:
         self._conn.close()
@@ -234,6 +244,7 @@ class StateStore:
                 ON files__{table}(status);
             """
         )
+        state_schema.ensure_file_table_columns(self._conn, table)
         self._conn.commit()
 
     def drop_watched_path(self, name: str) -> None:
@@ -648,8 +659,9 @@ class StateStore:
         now = time()
         for path in paths:
             self._conn.execute(
-                f"UPDATE files__{table} SET last_synced = ?, status = 'synced' "
-                "WHERE path = ?",
+                f"UPDATE files__{table} SET last_synced = ?, status = 'synced', "
+                "attempts = 0, last_error = NULL, last_error_at = NULL, "
+                "next_retry_at = NULL WHERE path = ?",
                 (now, path),
             )
         self._conn.commit()
@@ -679,6 +691,96 @@ class StateStore:
             )
             for row in cursor
         ]
+
+    def get_attachable(
+        self, watched_path_name: str, now: float | None = None
+    ) -> list[DiffEntry]:
+        """Pending files due for an upload attempt right now.
+
+        Same rows as `get_pending_changes`, minus the ones whose backoff has
+        not expired. A file that keeps failing therefore stops being
+        retried on every pass, which is what turns a stuck file from 72
+        full-size uploads a day into a handful.
+        """
+        table = self._table_for(watched_path_name)
+        now = time() if now is None else now
+        cursor = self._conn.execute(
+            f"SELECT path, size, modified, status, ids_json FROM files__{table} "
+            "WHERE status IN ('new', 'modified') AND ("
+            "  next_retry_at IS NULL OR next_retry_at <= ?"
+            # A file that has changed on disk since the failure is worth
+            # another go straight away: whatever went wrong may have been
+            # about that version of it. This is what keeps the backoff safe
+            # for a file being appended to while an experiment runs -- it
+            # never sits out its backoff while it is still growing.
+            "  OR (last_error_at IS NOT NULL AND modified > last_error_at)"
+            ")",
+            (now,),
+        )
+        return [
+            DiffEntry(
+                path=row["path"],
+                size=row["size"],
+                modified=row["modified"],
+                is_directory=False,
+                status=row["status"],
+                ids=json.loads(row["ids_json"] or "{}"),
+            )
+            for row in cursor
+        ]
+
+    def record_attach_failure(
+        self, watched_path_name: str, path: str, error: str
+    ) -> None:
+        """Count a failed attach and push the file's next attempt out.
+
+        Exponential from one minute, capped at an hour: 1m, 2m, 4m ... 1h.
+        Because the attach pass only runs every `metadata_interval` (twenty
+        minutes by default) the early steps are absorbed by that cadence
+        anyway, and the cap is what matters: it takes a permanently stuck
+        file from 72 full-size uploads a day down to 24.
+
+        The cap is an hour rather than something longer because a file can
+        fail for reasons that clear without warning -- the acquisition
+        software releasing a lock being the obvious one -- and an hour is
+        the most delay worth adding to that. There is deliberately no retry
+        limit: a daemon whose job is capturing data should not decide on its
+        own that a file is never coming. `get_attachable` also ignores the
+        backoff entirely for a file that has changed since it last failed.
+        """
+        table = self._table_for(watched_path_name)
+        now = time()
+        row = self._conn.execute(
+            f"SELECT attempts FROM files__{table} WHERE path = ?", (path,)
+        ).fetchone()
+        attempts = (row["attempts"] if row else 0) + 1
+        delay = min(60 * 2 ** (attempts - 1), 3600)
+        self._conn.execute(
+            f"UPDATE files__{table} SET attempts = ?, last_error = ?, "
+            "last_error_at = ?, next_retry_at = ? WHERE path = ?",
+            (
+                attempts,
+                str(error)[: state_schema.MAX_ERROR_CHARS],
+                now,
+                now + delay,
+                path,
+            ),
+        )
+        self._conn.commit()
+
+    def write_daemon_state(self, **fields: object) -> None:
+        """Upsert the single `daemon_state` row with whatever is given."""
+        if not fields:
+            return
+        columns = ", ".join(fields)
+        placeholders = ", ".join("?" for _ in fields)
+        assignments = ", ".join(f"{c} = excluded.{c}" for c in fields)
+        self._conn.execute(
+            f"INSERT INTO daemon_state (id, {columns}) VALUES (1, {placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {assignments}",
+            tuple(fields.values()),
+        )
+        self._conn.commit()
 
     def recently_modified_paths(
         self, watched_path_name: str, since: float

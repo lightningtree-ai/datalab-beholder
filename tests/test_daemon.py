@@ -924,7 +924,8 @@ class TestE2EAttachFlow:
     def test_failed_upload_leaves_entry_unsynced_for_retry(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """Server 500 on upload → state row stays `new`, next tick retries."""
+        """Server 500 on upload → the row stays `new` and is retried, but
+        not until its backoff has expired."""
         root = _attach_tree(tmp_path)
         config = _attach_config(tmp_path, root)
         transport = MockTransport()
@@ -961,8 +962,30 @@ class TestE2EAttachFlow:
             for e in pending_after_first
         )
 
-        # Force the attach interval to elapse again and retry.
-        daemon._last_attach_mono = time.monotonic() - 10
+        # Force the attach interval to elapse again. The file is still
+        # inside its backoff window, so this pass must leave it alone.
+        daemon._last_attach_mono = time.monotonic() - 10_000
+        before_backoff = sum(
+            1
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/upload-file/"
+        )
+        daemon.tick()
+        assert (
+            sum(
+                1
+                for r in transport.requests
+                if r.method == "POST" and r.url.path == "/upload-file/"
+            )
+            == before_backoff
+        ), "a file inside its backoff window must not be re-uploaded"
+
+        # Expire the backoff; now it is due again.
+        daemon._state._conn.execute(
+            "UPDATE files__cells SET next_retry_at = 0"
+        )
+        daemon._state._conn.commit()
+        daemon._last_attach_mono = time.monotonic() - 10_000
         upload_count_before = sum(
             1
             for r in transport.requests

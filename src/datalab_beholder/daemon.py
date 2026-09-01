@@ -20,6 +20,8 @@ from datalab_beholder.state import StateStore
 log = logging.getLogger(__name__)
 
 TICK_SECONDS = 1.0
+# How often the daemon persists its liveness row; the tick is 1 Hz.
+HEARTBEAT_SECONDS = 5.0
 
 
 def _match_block_type(filename: str, block_patterns: dict[str, str]) -> str | None:
@@ -80,6 +82,7 @@ class BeholderDaemon:
 
         # Watched paths still owed their startup scan; see `setup`.
         self._pending_full_scan: set[str] = set()
+        self._last_heartbeat_mono: float = float("-inf")
 
     @property
     def config(self) -> BeholderConfig:
@@ -185,6 +188,18 @@ class BeholderDaemon:
         else:
             self._pending_full_scan = set()
 
+        self._last_heartbeat_mono = float("-inf")
+        try:
+            self._state.write_daemon_state(
+                pid=os.getpid(),
+                host=platform.node(),
+                version=__version__,
+                started_at=time.time(),
+                sync_status="idle",
+            )
+        except Exception:  # pragma: no cover
+            log.debug("could not write daemon_state", exc_info=True)
+
         self._running = True
 
     def tick(self) -> None:
@@ -232,6 +247,35 @@ class BeholderDaemon:
         self.sync_status = "error" if failed else "idle"
 
         self._update_pending_count()
+        self._write_heartbeat(now_mono, now_wall)
+
+    def _write_heartbeat(self, now_mono: float, now_wall: float) -> None:
+        """Persist liveness and timing for readers in other processes.
+
+        `_last_attach_mono` is monotonic and in memory, so it dies with the
+        process and nothing outside can work out when the next attach is
+        due. Persisting the derived wall-clock deadline gives a reader that,
+        while leaving the scheduling itself on the monotonic clock, where it
+        is immune to NTP steps and DST.
+
+        Throttled: the tick runs at 1 Hz and this is not worth a commit a
+        second.
+        """
+        if now_mono - self._last_heartbeat_mono < HEARTBEAT_SECONDS:
+            return
+        self._last_heartbeat_mono = now_mono
+        interval = self._config.sync.metadata_interval
+        try:
+            self._state.write_daemon_state(
+                last_tick_at=now_wall,
+                last_attach_at=self.last_attach_time,
+                next_attach_at=now_wall
+                + max(0.0, interval - (now_mono - self._last_attach_mono)),
+                attach_interval=interval,
+                sync_status=self.sync_status,
+            )
+        except Exception:  # pragma: no cover - never break the loop over this
+            log.debug("could not write daemon_state", exc_info=True)
 
     def start(self) -> None:
         """CLI entry: setup + tick loop. Blocks until ``stop()`` is called."""
@@ -361,10 +405,10 @@ class BeholderDaemon:
                 continue
 
             pending = self._state.get_pending_changes(wp.name)
+            # Skips files whose backoff has not expired, so a file that keeps
+            # failing stops costing a full-size upload on every single pass.
             attachable = [
-                e
-                for e in pending
-                if e.status in ("new", "modified") and e.ids.get("item_id")
+                e for e in self._state.get_attachable(wp.name) if e.ids.get("item_id")
             ]
 
             # Pending rows with no captured `item_id` can never be attached.
@@ -391,6 +435,21 @@ class BeholderDaemon:
                 continue
 
             client = self._client_for(wp)
+
+            # A server-wide outage is not each file's fault. Without this,
+            # twenty minutes of downtime would drive every pending file's
+            # attempt count up and push them all to the six-hour backoff
+            # cap, so recovery would be far slower than the outage.
+            reachable, _ = client.check_connection()
+            if not reachable:
+                log.warning(
+                    "%s: datalab is unreachable; leaving %d file(s) pending "
+                    "without counting an attempt",
+                    wp.name,
+                    len(attachable),
+                )
+                continue
+
             log.info("Attaching %d file(s) for %s", len(attachable), wp.name)
 
             # Per-pass cache: item_id → item dict (or None if the item
@@ -433,6 +492,11 @@ class BeholderDaemon:
                         replace_file_id=replace_id,
                     )
                     if result is None:
+                        # attach_file logs and swallows; count it so the
+                        # backoff applies and the dashboard can see it.
+                        self._state.record_attach_failure(
+                            wp.name, entry.path, "upload did not succeed"
+                        )
                         continue
 
                     # Mark it synced as soon as the bytes are on the
@@ -480,13 +544,14 @@ class BeholderDaemon:
                                 item_id,
                                 entry.path,
                             )
-                except Exception:
+                except Exception as exc:
                     # One unhappy file must not take down the pass. Files
                     # already uploaded keep their synced mark, and every
                     # entry after this one still gets its turn.
                     log.exception(
                         "Failed to attach %s to item %s", entry.path, item_id
                     )
+                    self._state.record_attach_failure(wp.name, entry.path, exc)
                     # Only poison the cache when the item itself could not
                     # be resolved; if we already hold a good item, a later
                     # failure says nothing about the item's existence.
