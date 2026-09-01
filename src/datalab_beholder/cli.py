@@ -305,7 +305,18 @@ def gui(config_path: Path | None, log_level: str | None) -> None:
             "  macOS:         brew install python-tk"
         )
 
-    _setup_logging(log_level or "INFO")
+    # The GUI is the deployed entry point on an instrument PC, so it needs
+    # the logfile at least as much as `start` does. Without it there was no
+    # beholder.log to look at when something went wrong.
+    from datalab_beholder.config import load_config
+
+    try:
+        logfile = load_config(config_path).state_db.parent / "beholder.log"
+    except Exception:
+        # No config yet, or it does not parse. The GUI can still start and
+        # offer its settings editor, so don't refuse to launch over a log.
+        logfile = None
+    _setup_logging(log_level or "INFO", logfile)
 
     app = BeholderGUI(config_path)
     app.mainloop()
@@ -332,7 +343,10 @@ def status(config_path: Path | None) -> None:
 
     from datalab_beholder.config import LocalWatchedPath
 
-    state = StateStore(config.state_db)
+    # Read-only: this runs against a database the daemon may have open,
+    # and a read-write open would run the legacy-table migration -- a
+    # DROP TABLE -- underneath it.
+    state = StateStore(config.state_db, read_only=True)
     try:
         for wp in config.watched_paths:
             location = str(getattr(wp, "path", wp.kind))

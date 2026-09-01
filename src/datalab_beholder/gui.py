@@ -480,12 +480,12 @@ class BeholderGUI(tk.Tk):
 
         # Sync indicator
         status = self._daemon.sync_status
-        if status == "pushing":
+        if status == "attaching":
             self._set_indicator(
                 self._sync_ind,
                 YELLOW,
                 self._sync_ind_label,
-                "Pushing",
+                "Attaching",
             )
         elif status == "error":
             self._set_indicator(
