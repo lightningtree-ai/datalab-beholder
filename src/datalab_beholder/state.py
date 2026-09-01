@@ -683,14 +683,26 @@ class StateStore:
     def recently_modified_paths(
         self, watched_path_name: str, since: float
     ) -> list[str]:
-        """Return paths whose `modified` timestamp is newer than `since`.
+        """Return paths worth re-stat'ing: those modified since `since`, or
+        synced since `since`.
 
-        Used by the hot scan to pick the small set of files worth re-stat'ing.
+        Used by the hot scan to pick its small candidate set. The
+        `last_synced` arm matters for files that are being appended to in
+        place, which is the normal shape of a running cycler experiment.
+        Such a file never moves its parent directory's mtime, so the warm
+        scan cannot see it grow, and eligibility here is judged on the
+        *stored* mtime. An instrument that stamps mtime once at the start of
+        a run therefore drops out of the candidate set as soon as the run
+        outlives `hot_window`, and the file is not looked at again until the
+        cold scan — 24 hours later by default. A file we uploaded recently
+        is exactly the one most likely to still be growing, so keep it in
+        the set.
         """
         table = self._table_for(watched_path_name)
         cursor = self._conn.execute(
-            f"SELECT path FROM files__{table} WHERE modified > ? ORDER BY path",
-            (since,),
+            f"SELECT path FROM files__{table} "
+            "WHERE modified > ? OR last_synced > ? ORDER BY path",
+            (since, since),
         )
         return [row["path"] for row in cursor]
 
