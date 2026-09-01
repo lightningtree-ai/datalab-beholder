@@ -1121,9 +1121,40 @@ class TestRescanOnStart:
 
         assert daemon._select_scan_tier(wp, now) == "cold"
         assert daemon._select_scan_tier(second, now) == "cold"
-        # ...and only once each.
+
+        # The marker is cleared by `tick`, once the scan has actually run,
+        # and only once each.
+        daemon.tick()
         assert daemon._select_scan_tier(wp, now) is None
         assert daemon._select_scan_tier(second, now) is None
+
+    def test_a_failed_startup_scan_is_retried_on_the_next_tick(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The watched share is routinely not mounted a second after boot."""
+        root = tmp_path / "data"
+        root.mkdir()
+        config, daemon = self._daemon(tmp_path, root, monkeypatch)
+        wp = config.watched_paths[0]
+        daemon._state.update_scan_timestamp("cells", "cold", time.time())
+
+        daemon.setup()
+
+        calls: list[str] = []
+
+        def boom(_wp, kind: str) -> None:
+            calls.append(kind)
+            raise OSError("share not mounted")
+
+        monkeypatch.setattr(daemon, "_run_scan", boom)
+        daemon.tick()
+        assert calls == ["cold"]
+        # Still owed: the scan never happened.
+        assert daemon._select_scan_tier(wp, time.time()) == "cold"
+
+        monkeypatch.undo()
+        daemon.tick()
+        assert daemon._select_scan_tier(wp, time.time()) is None
 
     def test_can_be_switched_off(self, tmp_path: Path, monkeypatch) -> None:
         root = tmp_path / "data"

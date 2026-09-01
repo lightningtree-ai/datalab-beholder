@@ -193,12 +193,19 @@ class BeholderDaemon:
 
         self._last_heartbeat_mono = float("-inf")
         try:
+            # The timing columns are cleared as well as the identity ones:
+            # a row left by an earlier run carries a `last_tick_at` that the
+            # dashboard would read as "running" and timings it would
+            # attribute to this pid, until the first heartbeat lands.
             self._state.write_daemon_state(
                 pid=os.getpid(),
                 host=platform.node(),
                 version=__version__,
                 started_at=time.time(),
                 sync_status="idle",
+                last_tick_at=None,
+                last_attach_at=None,
+                next_attach_at=None,
             )
         except Exception:  # pragma: no cover
             log.debug("could not write daemon_state", exc_info=True)
@@ -231,8 +238,10 @@ class BeholderDaemon:
             try:
                 self._run_scan(wp, kind)
                 self.last_scan_time = now_wall
+                self._pending_full_scan.discard(wp.name)
             except NotImplementedError:
                 log.debug("Scan kind %s not implemented for %s", kind, wp.name)
+                self._pending_full_scan.discard(wp.name)
             except Exception:
                 log.exception("Error running %s scan for %s", kind, wp.name)
                 failed = True
@@ -363,7 +372,12 @@ class BeholderDaemon:
         lower ones, which is reflected in `update_scan_timestamp`).
         """
         if wp.name in self._pending_full_scan:
-            self._pending_full_scan.discard(wp.name)
+            # Deliberately *not* discarded here. The marker is cleared by
+            # `tick` only once the scan has actually run: a startup scan
+            # that raises -- the watched share not being mounted yet is the
+            # ordinary case a second after boot -- must be retried on the
+            # next tick, not silently dropped until the next restart.
+            #
             # Degrade to warm where cold is disabled: `cold_interval: null`
             # is chosen for write-once archives where a full walk is the
             # thing being avoided.
