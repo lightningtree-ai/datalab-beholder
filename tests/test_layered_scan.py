@@ -280,3 +280,46 @@ class TestWarmScanDeletionScope:
         diff = wp.warm_scan(store)
         assert [e.path for e in diff.deleted] == ["CEL-080.mpr"]
         store.close()
+
+
+class TestHotScanIdHandling:
+    def test_hot_scan_does_not_wipe_ids_when_a_pattern_stops_matching(
+        self, tmp_path: Path
+    ) -> None:
+        """A hot scan must never overwrite a row's captured ids with an
+        empty dict.
+
+        `hot_stat_paths` used to carry an entry forward with `ids or {}`
+        even when no `id_pattern` matched it any more — which happens as
+        soon as an operator tightens `id_patterns`. The stored `ids_json`
+        was overwritten with `{}` and the status flipped to `modified`, and
+        because the attach filter requires an `item_id`, the file was then
+        pending forever, never attached, and logged nothing at all.
+        """
+        root = tmp_path / "neware"
+        root.mkdir()
+        f = root / "CEL-081.mpr"
+        f.write_bytes(b"x")
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        wp = LocalWatchedPath(
+            path=root,
+            name="wp",
+            datalab="d",
+            id_patterns=[r".*(?P<item_id>CEL-[0-9]{3,5}).*"],
+            scan={"hot_interval": 0, "warm_interval": 0, "cold_interval": 0},  # type: ignore[arg-type]
+        )
+        wp.cold_scan(store)
+        assert store.get_pending_changes("wp")[0].ids["item_id"] == "CEL-081"
+
+        # The operator tightens the regex so it no longer matches, and the
+        # file grows so the hot scan re-stats it.
+        wp.id_patterns = [r"(?P<item_id>CEL-[0-9]{4})"]
+        f.write_bytes(b"xx")
+
+        wp.hot_scan(store)
+
+        after = store.get_pending_changes("wp")[0]
+        assert after.ids["item_id"] == "CEL-081", "captured ids must survive"
+        store.close()

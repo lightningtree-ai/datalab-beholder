@@ -319,6 +319,27 @@ class BeholderDaemon:
                 for e in pending
                 if e.status in ("new", "modified") and e.ids.get("item_id")
             ]
+
+            # Pending rows with no captured `item_id` can never be attached.
+            # They are not an error, but silently dropping them is how a
+            # watched path ends up reporting a pending count that never goes
+            # down with nothing in the log to say why. The dry-run path
+            # already reports this; the daemon did not.
+            unattachable = [
+                e
+                for e in pending
+                if e.status in ("new", "modified") and not e.ids.get("item_id")
+            ]
+            if unattachable:
+                log.info(
+                    "%s: %d pending file(s) have no item_id and cannot be "
+                    "attached; check id_patterns",
+                    wp.name,
+                    len(unattachable),
+                )
+                for e in unattachable:
+                    log.debug("  no item_id: %s", e.path)
+
             if not attachable:
                 continue
 
