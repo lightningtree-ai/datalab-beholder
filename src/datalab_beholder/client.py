@@ -171,6 +171,18 @@ class BeholderClient(DatalabClient):
                 "Failed to create %s block on item %s: %s", block_type, item_id, e
             )
             return None
+        except (RuntimeError, KeyError) as e:
+            # ``create_data_block`` re-fetches the item and raises a bare
+            # RuntimeError when the server does not yet list the file we
+            # just uploaded, and KeyError when the response has no
+            # ``new_block_obj``. Neither is a DatalabAPIError, and the
+            # first is routine when the server lags a moment behind the
+            # upload. A block is a convenience on top of an attachment
+            # that already succeeded, so log and carry on.
+            log.error(
+                "Failed to create %s block on item %s: %s", block_type, item_id, e
+            )
+            return None
 
     def attach_file(
         self,

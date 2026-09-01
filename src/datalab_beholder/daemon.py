@@ -330,41 +330,50 @@ class BeholderDaemon:
             # the same item.
             item_cache: dict[str, dict[str, Any] | None] = {}
 
-            synced: list[str] = []
+            attached = 0
             for entry in attachable:
                 file_path = wp.path / entry.path
                 item_id = entry.ids["item_id"]
 
-                if item_id not in item_cache:
-                    if wp.item_type:
-                        item_cache[item_id] = client.ensure_item(
-                            item_id=item_id,
-                            item_type=wp.item_type,
-                            collection_id=entry.ids.get("collection_id"),
-                            group_id=entry.ids.get("group_id"),
+                try:
+                    if item_id not in item_cache:
+                        if wp.item_type:
+                            item_cache[item_id] = client.ensure_item(
+                                item_id=item_id,
+                                item_type=wp.item_type,
+                                collection_id=entry.ids.get("collection_id"),
+                                group_id=entry.ids.get("group_id"),
+                            )
+                        else:
+                            # No item_type configured → don't create, only
+                            # attach if the item already exists.
+                            item_cache[item_id] = client.fetch_item(item_id)
+
+                    item = item_cache[item_id]
+                    if item is None:
+                        log.warning(
+                            "Skipping %s: item %s not found and not creatable",
+                            entry.path,
+                            item_id,
                         )
-                    else:
-                        # No item_type configured → don't create, only
-                        # attach if the item already exists.
-                        item_cache[item_id] = client.fetch_item(item_id)
+                        continue
 
-                item = item_cache[item_id]
-                if item is None:
-                    log.warning(
-                        "Skipping %s: item %s not found and not creatable",
-                        entry.path,
-                        item_id,
+                    replace_id = client.find_existing_file_id(item, file_path.name)
+                    result = client.attach_file(
+                        item_id=item_id,
+                        file_path=file_path,
+                        replace_file_id=replace_id,
                     )
-                    continue
+                    if result is None:
+                        continue
 
-                replace_id = client.find_existing_file_id(item, file_path.name)
-                result = client.attach_file(
-                    item_id=item_id,
-                    file_path=file_path,
-                    replace_file_id=replace_id,
-                )
-                if result is not None:
-                    synced.append(entry.path)
+                    # Mark it synced as soon as the bytes are on the
+                    # server, before the block attempt below. Anything
+                    # that goes wrong afterwards must not cause this file
+                    # to be uploaded all over again on the next pass.
+                    self._state.mark_synced(wp.name, [entry.path])
+                    attached += 1
+
                     if result.get("not_modified"):
                         # Server already holds identical content (it
                         # compares hashes). Marking it synced anyway is
@@ -403,9 +412,22 @@ class BeholderDaemon:
                                 item_id,
                                 entry.path,
                             )
+                except Exception:
+                    # One unhappy file must not take down the pass. Files
+                    # already uploaded keep their synced mark, and every
+                    # entry after this one still gets its turn.
+                    log.exception(
+                        "Failed to attach %s to item %s", entry.path, item_id
+                    )
+                    # Only poison the cache when the item itself could not
+                    # be resolved; if we already hold a good item, a later
+                    # failure says nothing about the item's existence.
+                    item_cache.setdefault(item_id, None)
 
-            if synced:
-                self._state.mark_synced(wp.name, synced)
+            if attached != len(attachable):
+                log.warning(
+                    "Attached %d of %d file(s) for %s", attached, len(attachable), wp.name
+                )
             self._state.remove_deleted(wp.name)
 
 

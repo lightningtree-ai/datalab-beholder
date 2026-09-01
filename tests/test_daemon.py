@@ -459,6 +459,83 @@ class TestE2EAttachFlow:
         )
         assert b'"block_type":"cycle"' in add_block_req.content
 
+    def test_one_failing_block_does_not_abort_the_pass(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A block failure on one file must not un-sync the files already
+        uploaded in the same pass, nor skip the ones after it.
+
+        ``datalab_api.create_data_block`` re-fetches the item and raises a
+        bare ``RuntimeError`` when the server does not yet list the file
+        that was just uploaded — routine when the server lags a moment
+        behind an upload. That is not a ``DatalabAPIError``, so before
+        this fix it escaped the whole attach pass: the batched
+        ``mark_synced`` at the end never ran, every file already uploaded
+        in that pass stayed ``new`` and was uploaded again on the next
+        pass, and every file after it was never attempted at all.
+        """
+        root = tmp_path / "data"
+        root.mkdir()
+        for item in ("41", "42", "43"):
+            (root / f"{item}-cell-formation.mpr").write_bytes(b"\x00" * 16)
+
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        transport = MockTransport()
+
+        for item in ("41", "42", "43"):
+            transport.add_response(
+                "GET",
+                f"/get-item-data/{item}",
+                status_code=200,
+                json_data={
+                    "item_data": {
+                        "item_id": item,
+                        "blocks_obj": {},
+                        "display_order": [],
+                        "files": [],
+                        # 42 is the straggler: the server has not yet listed
+                        # the uploaded file, so create_data_block raises.
+                        "file_ObjectIds": [] if item == "42" else ["file-xyz"],
+                    }
+                },
+            )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+        transport.add_response(
+            "POST",
+            "/add-data-block/",
+            status_code=200,
+            json_data={"new_block_obj": {"blocktype": "cycle"}},
+        )
+        transport.add_response(
+            "POST",
+            "/update-block/",
+            status_code=200,
+            json_data={"new_block_data": {"blocktype": "cycle", "file_id": "file-xyz"}},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        config.watched_paths[0].cold_scan(daemon._state)
+        # Called directly rather than through tick(), which would swallow
+        # the escaping exception this test is about.
+        daemon._attach_matched_files()
+
+        uploads = [
+            r
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/upload-file/"
+        ]
+        assert len(uploads) == 3, "every file should have been attempted"
+
+        pending = daemon._state.get_pending_changes("cells")
+        assert pending == [], f"nothing should still be pending, got {pending}"
+
     def test_block_pattern_skipped_when_block_already_wired_to_this_file(
         self, tmp_path: Path, monkeypatch
     ) -> None:
