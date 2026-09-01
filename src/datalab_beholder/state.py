@@ -44,18 +44,29 @@ _SANITISE_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
 def _in_scope_filter(changed_dirs: list[str]):
-    """Build a predicate `path -> bool` that returns True if `path` is
-    inside any of the directories in `changed_dirs`.
+    """Build a predicate `path -> bool` that returns True if `path` sits
+    directly in a directory whose contents were actually re-stat'd.
 
-    Empty string in `changed_dirs` means the watched-path root itself was
-    rescanned, which scopes the entire tree.
+    `changed_dirs` holds exactly the directories the warm scan enumerated
+    (empty string being the watched-path root). A warm scan is a partial
+    view by construction: it short-circuits directories whose mtime has not
+    moved and never looks inside them. So it may only conclude that a file
+    is gone when it actually looked in the directory that would hold it —
+    testing the file's immediate parent, not a path prefix.
+
+    Prefix matching was wrong in both directions. The root being rescanned
+    scoped the entire tree, so one new top-level file made every file in
+    every short-circuited subdirectory look deleted; they were then pruned
+    from state and re-uploaded from scratch. And a scanned `subdir` also
+    scoped `subdir/deep/`, which the scan may never have entered.
     """
-    if "" in changed_dirs:
-        return lambda _path: True
-    prefixes = tuple(d.rstrip("/") + "/" for d in changed_dirs if d)
-    if not prefixes:
-        return lambda _path: False
-    return lambda path: path.startswith(prefixes)
+    scanned = {d.strip("/") for d in changed_dirs}
+
+    def _in_scope(path: str) -> bool:
+        parent, _, _ = path.rpartition("/")
+        return parent in scanned
+
+    return _in_scope
 
 
 def _sanitise_name(name: str) -> str:

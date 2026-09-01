@@ -215,3 +215,68 @@ class TestWarmScanAnchor:
         diff = wp.warm_scan(store)
         assert [e.path for e in diff.new] == ["CEL-081.mpr"]
         store.close()
+
+
+class TestWarmScanDeletionScope:
+    def test_untouched_subdir_is_not_mass_marked_deleted(
+        self, tmp_path: Path
+    ) -> None:
+        """A warm scan may only call a file deleted if it actually looked in
+        the directory that would hold it.
+
+        One new file at the top level moves the root's mtime, so the root is
+        re-stat'd while a quiet subdirectory is short-circuited. The scope
+        filter used to widen to the whole tree in that case, so every file
+        in the untouched subdirectory was marked deleted, pruned from state
+        by `remove_deleted`, and then re-uploaded from scratch by the next
+        cold scan.
+        """
+        root = tmp_path / "neware"
+        root.mkdir()
+        sub = root / "old-cells"
+        sub.mkdir()
+        (sub / "CEL-001.mpr").write_bytes(b"x")
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        wp = _make("wp", root, warm_interval=0, cold_interval=None)
+        wp.cold_scan(store)
+        store.mark_synced("wp", ["old-cells/CEL-001.mpr"])
+
+        # The subdirectory goes quiet; a new file lands at the top level,
+        # which moves the root's mtime but not the subdirectory's.
+        _bump_mtime(sub, -30 * 86400)
+        (root / "CEL-081.mpr").write_bytes(b"y")
+
+        diff = wp.warm_scan(store)
+
+        assert [e.path for e in diff.deleted] == []
+        assert [e.path for e in diff.new] == ["CEL-081.mpr"]
+
+        store.remove_deleted("wp")
+        rows = {
+            r[0]
+            for r in store._conn.execute("SELECT path FROM files__wp").fetchall()
+        }
+        assert "old-cells/CEL-001.mpr" in rows
+        store.close()
+
+    def test_a_file_really_removed_from_a_scanned_dir_is_still_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """The narrower scope must not cost real deletion detection."""
+        root = tmp_path / "neware"
+        root.mkdir()
+        (root / "CEL-079.mpr").write_bytes(b"x")
+        (root / "CEL-080.mpr").write_bytes(b"y")
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        wp = _make("wp", root, warm_interval=0, cold_interval=None)
+        wp.cold_scan(store)
+
+        (root / "CEL-080.mpr").unlink()
+
+        diff = wp.warm_scan(store)
+        assert [e.path for e in diff.deleted] == ["CEL-080.mpr"]
+        store.close()
