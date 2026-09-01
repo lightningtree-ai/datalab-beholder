@@ -13,6 +13,7 @@ cloud-sync paths).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ from pathlib import Path
 from time import time
 
 from datalab_beholder.scanner import FileEntry, ScanResult, WarmScanResult
+
+log = logging.getLogger(__name__)
 
 # Registry + sync log are always present. Per-path file tables are created
 # on demand by `register_watched_path`.
@@ -731,7 +734,27 @@ class StateStore:
     def update_max_dir_mtime(self, watched_path_name: str, mtime: float) -> None:
         """Record the maximum directory mtime seen during the last warm or
         cold scan; the next warm scan uses it to short-circuit unchanged
-        subtrees."""
+        subtrees.
+
+        The anchor is clamped to the present. A directory whose mtime is in
+        the future — clock skew, or data copied in from a USB stick or NAS
+        with timestamps preserved — would otherwise park the anchor ahead
+        of wall-clock and make every later warm scan short-circuit the
+        *entire* tree until real time caught up. With ``cold_interval:
+        null`` that is permanent. The offending directory is still scanned;
+        it just never becomes the anchor.
+        """
+        now = time()
+        if mtime > now:
+            log.warning(
+                "%s: directory mtime %.0f is in the future (now %.0f); "
+                "clamping the warm-scan anchor. Check the clock on this "
+                "machine and on any share it watches.",
+                watched_path_name,
+                mtime,
+                now,
+            )
+            mtime = now
         self._conn.execute(
             "UPDATE watched_paths SET last_max_dir_mtime = ? WHERE name = ?",
             (mtime, watched_path_name),
