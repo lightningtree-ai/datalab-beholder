@@ -348,7 +348,13 @@ def warm_scan_directory(
         # Mtime short-circuit: if this directory hasn't changed since the
         # last warm scan, its files are assumed stable. We still need to
         # recurse into subdirectories — their mtimes don't propagate up.
-        scan_files_here = since_mtime is None or dir_mtime > since_mtime
+        # `>=`, not `>`: a file that lands in the same mtime tick as the
+        # previous scan would otherwise be invisible to every later warm
+        # scan. Filesystems with coarse mtime granularity (exFAT rounds to
+        # 2 s, as do some SMB shares) hit that routinely. The cost is
+        # re-stating the single most-recently-touched directory each pass,
+        # which is the one worth re-stating anyway.
+        scan_files_here = since_mtime is None or dir_mtime >= since_mtime
         if scan_files_here:
             rel_dir = _rel(str(directory)) if directory != root else ""
             changed_dirs.append(rel_dir)

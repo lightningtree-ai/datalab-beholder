@@ -144,3 +144,74 @@ class TestHotScan:
 
         diff = wp.hot_scan(store)
         assert not diff.has_changes
+
+
+class TestWarmScanAnchor:
+    """The warm-scan short-circuit anchor (`last_max_dir_mtime`)."""
+
+    def test_future_dated_dir_does_not_blind_the_whole_tree(
+        self, tmp_path: Path
+    ) -> None:
+        """A directory with an mtime in the future must not become the
+        anchor.
+
+        `max_dir_mtime` is a single high-water mark for the entire watched
+        path. Data copied in from a USB stick or a NAS with timestamps
+        preserved, or a machine whose clock is ahead, lands a directory
+        mtime in the future; that used to park the anchor there and make
+        every later warm scan short-circuit every directory until
+        wall-clock caught up. With `cold_interval: null` it never does.
+        """
+        root = tmp_path / "neware"
+        root.mkdir()
+        live = root / "channel-1"
+        live.mkdir()
+        (live / "CEL-079.mpr").write_bytes(b"x")
+
+        imported = root / "imported-from-usb"
+        imported.mkdir()
+        _bump_mtime(imported, 7 * 86400)  # a week ahead
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        wp = _make("wp", root, warm_interval=0, cold_interval=None)
+
+        wp.warm_scan(store)
+        anchor = store.get_scan_timestamps("wp").max_dir_mtime
+        assert anchor is not None and anchor <= time.time()
+
+        # A brand new file lands in the live directory.
+        (live / "CEL-081.mpr").write_bytes(b"y")
+
+        diff = wp.warm_scan(store)
+        assert [e.path for e in diff.new] == ["channel-1/CEL-081.mpr"]
+        store.close()
+
+    def test_file_landing_on_the_anchor_tick_is_still_found(
+        self, tmp_path: Path
+    ) -> None:
+        """The short-circuit compares `>=`, not `>`.
+
+        On a filesystem with coarse mtime granularity (exFAT rounds to 2 s,
+        as do some SMB shares) a file can land in its parent directory
+        within the same tick as the previous scan. With a strict `>` that
+        file was invisible to every later warm scan.
+        """
+        root = tmp_path / "neware"
+        root.mkdir()
+        (root / "CEL-079.mpr").write_bytes(b"x")
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        wp = _make("wp", root, warm_interval=0, cold_interval=None)
+        wp.warm_scan(store)
+        anchor = store.get_scan_timestamps("wp").max_dir_mtime
+        assert anchor is not None
+
+        # New file, but the directory mtime lands exactly on the anchor.
+        (root / "CEL-081.mpr").write_bytes(b"y")
+        os.utime(root, (anchor, anchor))
+
+        diff = wp.warm_scan(store)
+        assert [e.path for e in diff.new] == ["CEL-081.mpr"]
+        store.close()
