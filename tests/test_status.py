@@ -117,9 +117,7 @@ class TestCollectStatus:
         assert collect_status(config)["daemon"]["running"] is True
 
         store = StateStore(config.state_db)
-        store.write_daemon_state(
-            last_tick_at=time.time() - STALE_AFTER_SECONDS - 10
-        )
+        store.write_daemon_state(last_tick_at=time.time() - STALE_AFTER_SECONDS - 10)
         store.close()
 
         daemon = collect_status(config)["daemon"]
@@ -213,3 +211,35 @@ class TestStatusServer:
             assert urllib.request.urlopen(base + "/", timeout=5).status == 200
         finally:
             server.stop()
+
+    def test_a_broken_log_handler_does_not_cost_the_client_its_reply(
+        self, tmp_path: Path
+    ) -> None:
+        """Reporting the failure must not become a second failure.
+
+        The GUI attaches a handler that writes into a Tk widget, and Tk
+        raises when touched from a thread other than its main loop, which is
+        exactly where the server answers from. Logging the snapshot error
+        before sending the response meant the client got a closed connection
+        instead of the error it asked for.
+        """
+        import logging
+
+        class Exploding(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                raise RuntimeError("main thread is not in main loop")
+
+        def boom():
+            raise RuntimeError("nope")
+
+        handler = Exploding()
+        logging.getLogger("datalab_beholder").addHandler(handler)
+        server, base = self._serve(boom)
+        try:
+            data = json.loads(
+                urllib.request.urlopen(base + "/api/status", timeout=5).read()
+            )
+            assert "nope" in data["error"]
+        finally:
+            server.stop()
+            logging.getLogger("datalab_beholder").removeHandler(handler)

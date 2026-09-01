@@ -235,12 +235,18 @@ class _Handler(BaseHTTPRequestHandler):
         if route == "/":
             self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
         elif route == "/api/status":
+            failure: Exception | None = None
             try:
                 body = json.dumps(self.server.snapshot(), default=str)  # type: ignore[attr-defined]
             except Exception as e:  # pragma: no cover - defensive
-                log.exception("status snapshot failed")
+                failure = e
                 body = json.dumps({"error": f"{type(e).__name__}: {e}"})
             self._send(200, "application/json", body.encode("utf-8"))
+            if failure is not None:  # pragma: no cover - defensive
+                # After the reply, not before. Logging runs arbitrary handlers
+                # and one of them may raise on this thread; the client should
+                # still get its answer.
+                log.error("status snapshot failed", exc_info=failure)
         else:
             self._send(404, "text/plain; charset=utf-8", b"not found\n")
 
