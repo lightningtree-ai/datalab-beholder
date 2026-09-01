@@ -218,9 +218,7 @@ class TestWarmScanAnchor:
 
 
 class TestWarmScanDeletionScope:
-    def test_untouched_subdir_is_not_mass_marked_deleted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_untouched_subdir_is_not_mass_marked_deleted(self, tmp_path: Path) -> None:
         """A warm scan may only call a file deleted if it actually looked in
         the directory that would hold it.
 
@@ -255,8 +253,7 @@ class TestWarmScanDeletionScope:
 
         store.remove_deleted("wp")
         rows = {
-            r[0]
-            for r in store._conn.execute("SELECT path FROM files__wp").fetchall()
+            r[0] for r in store._conn.execute("SELECT path FROM files__wp").fetchall()
         }
         assert "old-cells/CEL-001.mpr" in rows
         store.close()
@@ -326,9 +323,7 @@ class TestHotScanIdHandling:
 
 
 class TestHotScanGrowthWindow:
-    def test_a_recently_synced_file_stays_a_hot_candidate(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_recently_synced_file_stays_a_hot_candidate(self, tmp_path: Path) -> None:
         """A file that resumes growing after a long quiet spell must not
         have to wait for the cold scan.
 

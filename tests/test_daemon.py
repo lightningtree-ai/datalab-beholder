@@ -985,9 +985,7 @@ class TestE2EAttachFlow:
         ), "a file inside its backoff window must not be re-uploaded"
 
         # Expire the backoff; now it is due again.
-        daemon._state._conn.execute(
-            "UPDATE files__cells SET next_retry_at = 0"
-        )
+        daemon._state._conn.execute("UPDATE files__cells SET next_retry_at = 0")
         daemon._state._conn.commit()
         daemon._last_attach_mono = time.monotonic() - 10_000
         upload_count_before = sum(

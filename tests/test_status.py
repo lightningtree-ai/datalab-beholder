@@ -117,9 +117,7 @@ class TestCollectStatus:
         assert collect_status(config)["daemon"]["running"] is True
 
         store = StateStore(config.state_db)
-        store.write_daemon_state(
-            last_tick_at=time.time() - STALE_AFTER_SECONDS - 10
-        )
+        store.write_daemon_state(last_tick_at=time.time() - STALE_AFTER_SECONDS - 10)
         store.close()
 
         daemon = collect_status(config)["daemon"]

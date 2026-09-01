@@ -420,14 +420,12 @@ class SyncConfig(BaseModel):
     """Timing configuration for sync loops."""
 
     metadata_interval: int = 1200
-    rescan_on_start: bool = Field(
-        True,
-        description=(
-            "Run one full (cold) scan of each watched path on startup, "
-            "regardless of when the last one ran. Set false on a very large "
-            "tree where the walk is expensive and a restart is routine."
-        ),
-    )
+    # Run one full (cold) scan of each watched path on startup, regardless of
+    # when the last one ran. Set false on a very large tree where the walk is
+    # expensive and restarts are routine. A plain default rather than a
+    # Field(...) so `SyncConfig()` still type-checks without the pydantic
+    # mypy plugin, matching `metadata_interval` above.
+    rescan_on_start: bool = True
 
 
 class DatalabConfig(BaseModel):

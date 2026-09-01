@@ -42,7 +42,7 @@ def _legacy_db(path: Path) -> Path:
     conn.execute(
         "INSERT INTO files__sycamore (path, size, modified, last_seen, status, "
         "ids_json) VALUES ('CEL-9998.ndax', 10, 1.0, 2.0, 'new', "
-        "'{\"item_id\": \"CEL-9998\"}')"
+        '\'{"item_id": "CEL-9998"}\')'
     )
     conn.commit()
     conn.close()
@@ -56,9 +56,7 @@ class TestMigration:
         db = _legacy_db(tmp_path / "state.db")
 
         store = StateStore(db)
-        cols = {
-            r[1] for r in store._conn.execute("PRAGMA table_info(files__sycamore)")
-        }
+        cols = {r[1] for r in store._conn.execute("PRAGMA table_info(files__sycamore)")}
         assert {"attempts", "last_error", "last_error_at", "next_retry_at"} <= cols
 
         pending = store.get_pending_changes("sycamore")
@@ -107,9 +105,7 @@ class TestMigration:
         assert [e.path for e in store.get_pending_changes("sycamore")] == [
             "CEL-9998.ndax"
         ]
-        cols = {
-            r[1] for r in store._conn.execute("PRAGMA table_info(files__sycamore)")
-        }
+        cols = {r[1] for r in store._conn.execute("PRAGMA table_info(files__sycamore)")}
         assert "attempts" not in cols
         store.close()
 
@@ -135,9 +131,7 @@ class TestBackoff:
 
         # Once the backoff has expired it is due again.
         later = time.time() + 7200
-        assert [e.path for e in store.get_attachable("wp", now=later)] == [
-            "a.ndax"
-        ]
+        assert [e.path for e in store.get_attachable("wp", now=later)] == ["a.ndax"]
         store.close()
 
     def test_backoff_is_capped(self, tmp_path: Path) -> None:

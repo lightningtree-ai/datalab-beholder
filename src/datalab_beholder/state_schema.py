@@ -67,9 +67,7 @@ def ensure_file_table_columns(conn: sqlite3.Connection, table_name: str) -> None
         return
     for column, decl in FILE_TABLE_COLUMNS.items():
         if column not in have:
-            conn.execute(
-                f"ALTER TABLE files__{table_name} ADD COLUMN {column} {decl}"
-            )
+            conn.execute(f"ALTER TABLE files__{table_name} ADD COLUMN {column} {decl}")
 
 
 def migrate(conn: sqlite3.Connection) -> None:

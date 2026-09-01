@@ -320,9 +320,7 @@ class BeholderDaemon:
         from datalab_beholder.server import StatusServer
         from datalab_beholder.status import collect_status
 
-        server = StatusServer(
-            lambda: collect_status(self._config), port=int(port)
-        )
+        server = StatusServer(lambda: collect_status(self._config), port=int(port))
         if server.start():
             self._status_server = server
 
@@ -593,10 +591,8 @@ class BeholderDaemon:
                     # One unhappy file must not take down the pass. Files
                     # already uploaded keep their synced mark, and every
                     # entry after this one still gets its turn.
-                    log.exception(
-                        "Failed to attach %s to item %s", entry.path, item_id
-                    )
-                    self._state.record_attach_failure(wp.name, entry.path, exc)
+                    log.exception("Failed to attach %s to item %s", entry.path, item_id)
+                    self._state.record_attach_failure(wp.name, entry.path, str(exc))
                     # Only poison the cache when the item itself could not
                     # be resolved; if we already hold a good item, a later
                     # failure says nothing about the item's existence.
@@ -604,7 +600,10 @@ class BeholderDaemon:
 
             if attached != len(attachable):
                 log.warning(
-                    "Attached %d of %d file(s) for %s", attached, len(attachable), wp.name
+                    "Attached %d of %d file(s) for %s",
+                    attached,
+                    len(attachable),
+                    wp.name,
                 )
             self._state.remove_deleted(wp.name)
 

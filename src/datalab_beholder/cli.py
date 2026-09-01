@@ -408,9 +408,7 @@ def status(config_path: Path | None) -> None:
     default=None,
     help="State database to read. Default: the one named in the config.",
 )
-@click.option(
-    "--port", type=int, default=None, help="Port to serve on (127.0.0.1)."
-)
+@click.option("--port", type=int, default=None, help="Port to serve on (127.0.0.1).")
 def dashboard(
     config_path: Path | None, state_db: Path | None, port: int | None
 ) -> None:
@@ -432,8 +430,7 @@ def dashboard(
     except Exception as e:
         if state_db is None:
             raise click.ClickException(
-                f"no usable config ({e}); pass --state-db to read a database "
-                "directly"
+                f"no usable config ({e}); pass --state-db to read a database directly"
             )
         click.echo(f"No config loaded ({e}); reading {state_db} on its own.")
 
@@ -443,9 +440,7 @@ def dashboard(
     if not Path(db).exists():
         raise click.ClickException(f"state database not found: {db}")
 
-    server = StatusServer(
-        lambda: collect_status(config, db), port=port or DEFAULT_PORT
-    )
+    server = StatusServer(lambda: collect_status(config, db), port=port or DEFAULT_PORT)
     if not server.start(background=False):
         raise click.ClickException("could not bind the dashboard port")
     click.echo(f"Serving {db} at {server.url}  (ctrl-c to stop)")
