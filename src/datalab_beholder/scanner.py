@@ -14,7 +14,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-def is_future_dated(mtime: float, where: object) -> bool:
+def is_future_dated(mtime: float, where: object, warn: bool = True) -> bool:
     """True if `mtime` is ahead of wall-clock.
 
     The warm-scan anchor is a single high-water mark over directory mtimes
@@ -33,12 +33,18 @@ def is_future_dated(mtime: float, where: object) -> bool:
     """
     if mtime <= time.time():
         return False
-    log.warning(
-        "%s has a modification time in the future; ignoring it when setting "
-        "the warm-scan anchor. Check the clock on this machine and on any "
-        "share it watches.",
-        where,
-    )
+    if warn:
+        # Callers pass warn=False after the first hit in a scan. Skew is
+        # almost always a property of a whole share, so warning per
+        # directory would put one line per directory in beholder.log on
+        # every warm scan, and the log is the diagnostic.
+        log.warning(
+            "%s has a modification time in the future; ignoring it when "
+            "setting the warm-scan anchor (further such directories in this "
+            "scan are not logged). Check the clock on this machine and on "
+            "any share it watches.",
+            where,
+        )
     return True
 
 
@@ -353,16 +359,21 @@ def warm_scan_directory(
     def _rel(p: str) -> str:
         return os.path.relpath(p, root).replace(os.sep, "/")
 
+    future_warned = False
+
     def _walk(directory: Path, depth: int) -> None:
-        nonlocal max_dir_mtime
+        nonlocal max_dir_mtime, future_warned
         try:
             dir_mtime = directory.stat().st_mtime
         except (OSError, PermissionError) as e:
             log.warning("Cannot stat directory %s: %s", directory, e)
             return
 
-        if dir_mtime > max_dir_mtime and not is_future_dated(dir_mtime, directory):
-            max_dir_mtime = dir_mtime
+        if dir_mtime > max_dir_mtime:
+            if is_future_dated(dir_mtime, directory, warn=not future_warned):
+                future_warned = True
+            else:
+                max_dir_mtime = dir_mtime
 
         try:
             scanner = os.scandir(directory)

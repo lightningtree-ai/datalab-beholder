@@ -327,14 +327,13 @@ class LocalWatchedPath(WatchedPathBase):
 
         # Same anchor rule as the warm scan: a future-dated directory must
         # never become the high-water mark.
-        max_dir_mtime = max(
-            (
-                e.modified
-                for e in dir_entries
-                if not is_future_dated(e.modified, e.path)
-            ),
-            default=0.0,
-        )
+        max_dir_mtime = 0.0
+        future_warned = False
+        for e in dir_entries:
+            if is_future_dated(e.modified, e.path, warn=not future_warned):
+                future_warned = True
+            elif e.modified > max_dir_mtime:
+                max_dir_mtime = e.modified
         if max_dir_mtime:
             state.update_max_dir_mtime(self.name, max_dir_mtime)
         state.update_scan_timestamp(self.name, "cold", _now())
