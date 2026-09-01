@@ -364,3 +364,50 @@ class TestFetchItemErrorClassification:
         )
         with pytest.raises(DatalabAPIError):
             beholder_client.fetch_item("CEL-9999")
+
+
+class TestFailureReasonIsKept:
+    """`attach_file` swallows errors so the loop survives; the reason still
+    has to reach the state database, or the dashboard shows nothing useful."""
+
+    def test_an_api_error_is_kept(self, beholder_client, mock_transport, tmp_path):
+        f = tmp_path / "CEL-1.ndax"
+        f.write_bytes(b"x")
+        mock_transport.add_response(
+            "POST", "/upload-file/", status_code=500, json_data={"message": "boom"}
+        )
+        assert beholder_client.attach_file(item_id="CEL-1", file_path=f) is None
+        assert beholder_client.last_request_ok is False
+        assert "HTTP 500" in beholder_client.last_error
+
+    def test_an_unreadable_file_is_kept(
+        self, beholder_client, mock_transport, tmp_path
+    ):
+        """The Windows sharing-violation case, which is the common one."""
+        import datalab_api
+
+        def locked(self, item_id, file_path, replace_file_id=None):
+            raise PermissionError(32, "in use by another process")
+
+        f = tmp_path / "CEL-1.ndax"
+        f.write_bytes(b"x")
+        original = datalab_api.DatalabClient.upload_file
+        datalab_api.DatalabClient.upload_file = locked
+        try:
+            assert beholder_client.attach_file(item_id="CEL-1", file_path=f) is None
+        finally:
+            datalab_api.DatalabClient.upload_file = original
+        assert "in use by another process" in beholder_client.last_error
+
+    def test_a_success_clears_it(self, beholder_client, mock_transport, tmp_path):
+        f = tmp_path / "CEL-1.ndax"
+        f.write_bytes(b"x")
+        mock_transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "f1"},
+        )
+        beholder_client.last_error = "stale"
+        assert beholder_client.attach_file(item_id="CEL-1", file_path=f) is not None
+        assert beholder_client.last_error is None

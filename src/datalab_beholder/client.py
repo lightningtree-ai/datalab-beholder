@@ -50,6 +50,8 @@ class BeholderClient(DatalabClient):
     """Datalab client with daemon-friendly, non-raising helpers."""
 
     last_request_ok: bool = False
+    #: Why the last swallowed request failed, for the status dashboard.
+    last_error: str | None = None
 
     def check_connection(self) -> tuple[bool, bool]:
         """Probe the server with a lightweight ``GET /info``.
@@ -75,6 +77,17 @@ class BeholderClient(DatalabClient):
 
         self.last_request_ok = reachable
         return reachable, authenticated
+
+    def _note_failure(self, reason: str) -> None:
+        """Keep the reason an upload failed, not just that it did.
+
+        `attach_file` logs and swallows so one bad file cannot take the loop
+        down, which leaves the caller with a bare None. The caller is what
+        writes the failure into the state database for the dashboard to
+        show, and "upload did not succeed" is not worth showing.
+        """
+        self.last_request_ok = False
+        self.last_error = reason
 
     def fetch_item(self, item_id: str) -> dict[str, Any] | None:
         """Return the item's data dict, or ``None`` if the server says the
@@ -252,18 +265,18 @@ class BeholderClient(DatalabClient):
             )
         except FileNotFoundError:
             log.warning("File vanished before upload: %s", file_path)
-            self.last_request_ok = False
+            self._note_failure("file vanished before upload")
             return None
         except OSError as e:
             # Locked by the acquisition software, or the share dropped
             # out mid-read — both routine on an instrument PC watching a
             # network mount.
             log.warning("Could not read %s for upload: %s", file_path, e)
-            self.last_request_ok = False
+            self._note_failure(f"could not read the file: {e}")
             return None
         except DatalabAPIError as e:
             log.error("Failed to attach %s to item %s: %s", file_path, item_id, e)
-            self.last_request_ok = False
+            self._note_failure(str(e))
             return None
 
         if result.get("not_modified"):
@@ -274,4 +287,5 @@ class BeholderClient(DatalabClient):
             )
 
         self.last_request_ok = True
+        self.last_error = None
         return result

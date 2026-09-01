@@ -538,7 +538,9 @@ class BeholderDaemon:
                         # attach_file logs and swallows; count it so the
                         # backoff applies and the dashboard can see it.
                         self._state.record_attach_failure(
-                            wp.name, entry.path, "upload did not succeed"
+                            wp.name,
+                            entry.path,
+                            client.last_error or "upload did not succeed",
                         )
                         continue
 
