@@ -144,3 +144,44 @@ class TestHotScan:
 
         diff = wp.hot_scan(store)
         assert not diff.has_changes
+
+
+class TestHotScanGrowthWindow:
+    def test_a_recently_synced_file_stays_a_hot_candidate(
+        self, tmp_path: Path
+    ) -> None:
+        """A file that resumes growing after a long quiet spell must not
+        have to wait for the cold scan.
+
+        Appending in place never moves the parent directory's mtime, so the
+        warm scan cannot see it. Hot-scan eligibility is judged on the
+        *stored* mtime, so an instrument that stamps mtime once at the start
+        of a run drops that file out of the candidate set as soon as the run
+        outlives `hot_window` — and nothing looks at it again until the cold
+        scan, 24 hours later by default.
+        """
+        root = tmp_path / "neware"
+        root.mkdir()
+        f = root / "CEL-081.mpr"
+        f.write_bytes(b"x" * 1000)
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        wp = _make("wp", root, hot_interval=0, warm_interval=0, cold_interval=0)
+
+        wp.cold_scan(store)
+        store.mark_synced("wp", ["CEL-081.mpr"])
+
+        # The file's mtime is older than hot_window, but we uploaded it
+        # moments ago — the run is simply long-lived.
+        _bump_mtime(f, -2 * 86400)
+        wp.cold_scan(store)
+        store.mark_synced("wp", ["CEL-081.mpr"])
+
+        # Cycling resumes and the file grows in place.
+        with open(f, "ab") as fh:
+            fh.write(b"y" * 500)
+
+        diff = wp.hot_scan(store)
+        assert [e.path for e in diff.modified] == ["CEL-081.mpr"]
+        store.close()
