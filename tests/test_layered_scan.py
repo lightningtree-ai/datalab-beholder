@@ -187,6 +187,37 @@ class TestWarmScanAnchor:
         assert [e.path for e in diff.new] == ["channel-1/CEL-081.mpr"]
         store.close()
 
+    def test_the_anchor_is_a_real_directory_mtime(self, tmp_path: Path) -> None:
+        """The anchor must come from the filesystem, never from the clock.
+
+        Clamping a future-dated directory to `time.time()` also removes the
+        blindness, but it leaves the anchor slightly ahead of every real
+        timestamp in the tree, and the two clocks are not comparable at that
+        resolution: Linux stamps files from a coarse clock that can lag
+        `time.time()` by a scheduler tick, so a file written immediately
+        after a scan gets an mtime *below* the anchor and stays invisible.
+        Excluding future-dated directories instead keeps the anchor a value
+        the filesystem produced, which is what it is compared against.
+        """
+        root = tmp_path / "neware"
+        root.mkdir()
+        live = root / "channel-1"
+        live.mkdir()
+        (live / "CEL-079.mpr").write_bytes(b"x")
+
+        imported = root / "imported-from-usb"
+        imported.mkdir()
+        _bump_mtime(imported, 7 * 86400)
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        wp = _make("wp", root, warm_interval=0, cold_interval=None)
+        wp.warm_scan(store)
+
+        real = {root.stat().st_mtime, live.stat().st_mtime}
+        assert store.get_scan_timestamps("wp").max_dir_mtime in real
+        store.close()
+
     def test_file_landing_on_the_anchor_tick_is_still_found(
         self, tmp_path: Path
     ) -> None:

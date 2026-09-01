@@ -299,7 +299,7 @@ class LocalWatchedPath(WatchedPathBase):
         from dataclasses import replace
         from time import time as _now
 
-        from datalab_beholder.scanner import scan_directory
+        from datalab_beholder.scanner import is_future_dated, scan_directory
 
         # Include dir entries so we can compute max_dir_mtime — the warm
         # scan's short-circuit anchor — but strip them before diffing
@@ -321,7 +321,16 @@ class LocalWatchedPath(WatchedPathBase):
         file_scan = replace(scan, entries=file_entries)
         diff = state.update_from_scan(file_scan)
 
-        max_dir_mtime = max((e.modified for e in dir_entries), default=0.0)
+        # Same anchor rule as the warm scan: a future-dated directory must
+        # never become the high-water mark.
+        max_dir_mtime = max(
+            (
+                e.modified
+                for e in dir_entries
+                if not is_future_dated(e.modified, e.path)
+            ),
+            default=0.0,
+        )
         if max_dir_mtime:
             state.update_max_dir_mtime(self.name, max_dir_mtime)
         state.update_scan_timestamp(self.name, "cold", _now())
