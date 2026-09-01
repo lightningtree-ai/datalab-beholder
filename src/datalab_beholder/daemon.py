@@ -459,10 +459,22 @@ class BeholderDaemon:
         are skipped with a debug log until those backends grow upload
         paths of their own.
         """
+        # One reachability probe per client per pass, not per watched path.
+        # Several watched paths routinely share one datalab, and during an
+        # outage each probe blocks for the connect timeout on the thread
+        # running the tick -- which, under the GUI, is the Tk main loop.
+        reachable_by_client: dict[str, bool] = {}
+
         for wp in self._config.watched_paths:
             if not isinstance(wp, LocalWatchedPath):
                 log.debug("Skipping attach for %s: only local paths supported", wp.name)
                 continue
+
+            # Rows for files that have gone from disk are dropped whatever
+            # else happens below: the early exits (nothing attachable, the
+            # server unreachable) would otherwise let them accumulate for
+            # as long as the condition lasts.
+            self._state.remove_deleted(wp.name)
 
             pending = self._state.get_pending_changes(wp.name)
             # Skips files whose backoff has not expired, so a file that keeps
@@ -498,10 +510,11 @@ class BeholderDaemon:
 
             # A server-wide outage is not each file's fault. Without this,
             # twenty minutes of downtime would drive every pending file's
-            # attempt count up and push them all to the six-hour backoff
-            # cap, so recovery would be far slower than the outage.
-            reachable, _ = client.check_connection()
-            if not reachable:
+            # attempt count up and push them all to the one-hour backoff
+            # cap, so recovery would be slower than the outage.
+            if wp.datalab not in reachable_by_client:
+                reachable_by_client[wp.datalab] = client.check_connection()[0]
+            if not reachable_by_client[wp.datalab]:
                 log.warning(
                     "%s: datalab is unreachable; leaving %d file(s) pending "
                     "without counting an attempt",
@@ -542,6 +555,11 @@ class BeholderDaemon:
                             "Skipping %s: item %s not found and not creatable",
                             entry.path,
                             item_id,
+                        )
+                        self._state.record_attach_failure(
+                            wp.name,
+                            entry.path,
+                            f"item {item_id} not found and not creatable",
                         )
                         continue
 
@@ -612,10 +630,14 @@ class BeholderDaemon:
                     # entry after this one still gets its turn.
                     log.exception("Failed to attach %s to item %s", entry.path, item_id)
                     self._state.record_attach_failure(wp.name, entry.path, str(exc))
-                    # Only poison the cache when the item itself could not
-                    # be resolved; if we already hold a good item, a later
-                    # failure says nothing about the item's existence.
-                    item_cache.setdefault(item_id, None)
+                    # The cache is deliberately left alone. `fetch_item` now
+                    # raises rather than returning None when the server could
+                    # not be asked, so caching None here would turn one
+                    # transient error into "item not found and not creatable"
+                    # for every other file on the same item -- the exact
+                    # whole-item skid that raising was meant to end. Not
+                    # caching costs at most one extra lookup per file, and
+                    # only on a pass that is already failing.
 
             if attached != len(attachable):
                 log.warning(
@@ -624,7 +646,6 @@ class BeholderDaemon:
                     len(attachable),
                     wp.name,
                 )
-            self._state.remove_deleted(wp.name)
 
 
 # ----------------------------------------------------------------------
