@@ -41,6 +41,18 @@ CREATE TABLE IF NOT EXISTS watched_paths (
 _SANITISE_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
+def read_only_uri(db_path: Path) -> str:
+    """A `file:` URI that opens `db_path` read-only.
+
+    Built with `as_uri()` rather than by interpolating the path into a
+    string: SQLite parses `?` as the start of the query and `#` as the
+    start of a fragment, so a state database under a directory containing
+    either character would be opened under a truncated name -- or not at
+    all -- despite `exists()` having just said it was there.
+    """
+    return f"{Path(db_path).absolute().as_uri()}?mode=ro"
+
+
 def _in_scope_filter(changed_dirs: list[str]):
     """Build a predicate `path -> bool` that returns True if `path` sits
     directly in a directory whose contents were actually re-stat'd.
@@ -147,7 +159,7 @@ class StateStore:
             # SQLite URI mode=ro guarantees a dry-run consumer can never
             # mutate the daemon's state, and refuses to create a missing
             # DB rather than silently seeding an empty one.
-            self._conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            self._conn = sqlite3.connect(read_only_uri(self._db_path), uri=True)
             self._conn.row_factory = sqlite3.Row
             return
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +178,17 @@ class StateStore:
         state_schema.migrate(self._conn)
 
     def close(self) -> None:
+        # Fold the WAL back into the database file first, so a cleanly
+        # stopped daemon leaves one self-contained `state.db`. Without it
+        # the newest commits live only in `state.db-wal`, and copying the
+        # database off an instrument PC on its own -- which is exactly what
+        # `beholder dashboard` is for -- hands you a stale, possibly
+        # table-less, view. Best-effort: it fails on a read-only connection
+        # and on shares that refused WAL in the first place.
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:  # pragma: no cover - filesystem-dependent
+            pass
         self._conn.close()
 
     def __enter__(self):
