@@ -456,13 +456,29 @@ def hot_stat_paths(
             ids = _apply_id_templates(
                 ids, item_id_template, collection_id_template, rel
             )
+        if ids is None:
+            # No id_pattern matches any more, or a template referenced a
+            # capture group the regex stopped producing — typically because
+            # the operator edited `id_patterns`. `scan_directory` skips such
+            # a file outright; do the same here rather than carrying the
+            # entry forward with empty ids, which would overwrite the ids
+            # already stored for it and leave the row pending forever and
+            # never attachable. Returning it in neither list leaves the
+            # stored row exactly as it is; the next cold scan is
+            # authoritative.
+            log.warning(
+                "%s no longer matches any id_pattern; leaving its stored ids "
+                "untouched. Run a cold scan after changing id_patterns.",
+                rel,
+            )
+            continue
         survived.append(
             FileEntry(
                 path=rel,
                 size=st.st_size,
                 modified=st.st_mtime,
                 is_directory=False,
-                ids=ids or {},
+                ids=ids,
             )
         )
 
