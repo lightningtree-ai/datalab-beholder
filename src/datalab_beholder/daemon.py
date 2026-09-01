@@ -225,7 +225,12 @@ class BeholderDaemon:
     def shutdown(self) -> None:
         """Release resources. (No background threads to stop in the
         scan-based design.)"""
-        self._state.close()
+        # `start()` calls this from a `finally`, so it must not raise: an
+        # exception here would replace whatever ended the loop.
+        try:
+            self._state.close()
+        except Exception:  # pragma: no cover
+            log.debug("could not close the state database", exc_info=True)
         log.info("Daemon stopped.")
 
     def stop(self) -> None:
