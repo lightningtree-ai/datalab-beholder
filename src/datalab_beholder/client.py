@@ -17,12 +17,33 @@ accepted for now; tests monkeypatch those hooks via
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 from datalab_api import DatalabAPIError, DatalabClient
 
 log = logging.getLogger(__name__)
+
+
+# datalab-api's DatalabAPIError carries no status code of its own: the code
+# only ever appears inside the message, which _base.py formats as
+# "HTTP {code} error at {url}" (and, for a couple of statuses, as
+# "HTTP {code} Gateway Timeout at ..." and similar). Matching the number
+# after "HTTP" covers every one of those shapes.
+_HTTP_STATUS_RE = re.compile(r"\bHTTP (\d{3})\b")
+
+
+def _status_from_error(exc: Exception) -> int | None:
+    """Recover the HTTP status from a ``DatalabAPIError``, or None.
+
+    None means no status was reported at all, which is what happens when
+    the request never got an answer — datalab-api wraps httpx transport
+    failures without a code. That case must be treated as transient, never
+    as "the server said no".
+    """
+    match = _HTTP_STATUS_RE.search(str(exc))
+    return int(match.group(1)) if match else None
 
 
 class BeholderClient(DatalabClient):
@@ -56,13 +77,32 @@ class BeholderClient(DatalabClient):
         return reachable, authenticated
 
     def fetch_item(self, item_id: str) -> dict[str, Any] | None:
-        """Return the item's data dict, or ``None`` if it doesn't exist
-        (or any other error)."""
+        """Return the item's data dict, or ``None`` if the server says the
+        item does not exist.
+
+        Raises ``DatalabAPIError`` for anything else. "The server did not
+        answer" is not "the item is missing", and treating them alike was
+        actively harmful: after a transient failure the caller concluded
+        the item was absent and tried to create one that already existed,
+        which fails as a duplicate, and the file was then skipped. Because
+        the result is cached for the whole attach pass, that skipped every
+        file on that item, not just the one.
+        """
         try:
             return super().get_item(item_id=item_id, load_blocks=False)
         except DatalabAPIError as e:
-            log.debug("get_item(%s) failed: %s", item_id, e)
-            return None
+            if _status_from_error(e) == 404:
+                log.debug("item %s does not exist", item_id)
+                return None
+            raise
+        except (KeyError, TypeError) as e:
+            # get_item indexes into item["item_data"]["blocks_obj"] and
+            # ["display_order"] without guarding, so a response of an
+            # unexpected shape surfaces as a bare KeyError/TypeError.
+            # Callers only handle DatalabAPIError.
+            raise DatalabAPIError(
+                f"unexpected response shape for item {item_id}: {e!r}"
+            ) from e
 
     def ensure_item(
         self,

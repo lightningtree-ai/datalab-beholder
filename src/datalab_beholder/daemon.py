@@ -619,7 +619,27 @@ def dry_run(
                 filename = entry.path.rsplit("/", 1)[-1]
 
                 if item_id not in item_cache:
-                    item_cache[item_id] = client.fetch_item(item_id)
+                    try:
+                        item_cache[item_id] = client.fetch_item(item_id)
+                    except Exception as e:
+                        # fetch_item now distinguishes "does not exist" from
+                        # "could not ask". A dry run must not report "would
+                        # create" on the strength of a failed lookup.
+                        log.warning(
+                            "cannot determine whether item %s exists: %s",
+                            item_id,
+                            e,
+                        )
+                        actions.append(
+                            PlannedAction(
+                                wp.name,
+                                "attach_unknown",
+                                item_id,
+                                entry.path,
+                                "server state unknown",
+                            )
+                        )
+                        continue
                 item = item_cache[item_id]
 
                 replace_id: str | None = None

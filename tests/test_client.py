@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from datalab_api._base import DatalabAPIError
+
 from tests.conftest import _make_beholder_client
 
 
@@ -311,3 +314,53 @@ class TestBeholderClient:
             item_id="item-1", block_type="cycle", file_id="file-xyz"
         )
         assert result is None
+
+
+class TestFetchItemErrorClassification:
+    """`fetch_item` must not report "does not exist" for a failed request."""
+
+    def test_404_means_the_item_does_not_exist(
+        self, beholder_client, mock_transport
+    ) -> None:
+        # MockTransport answers 404 for any path it has no response for.
+        assert beholder_client.fetch_item("CEL-9999") is None
+
+    def test_server_error_is_raised_not_swallowed(
+        self, beholder_client, mock_transport
+    ) -> None:
+        mock_transport.add_response(
+            "GET",
+            "/get-item-data/CEL-9999",
+            status_code=503,
+            json_data={"message": "service unavailable"},
+        )
+        with pytest.raises(DatalabAPIError):
+            beholder_client.fetch_item("CEL-9999")
+
+    def test_auth_failure_is_raised_not_swallowed(
+        self, beholder_client, mock_transport
+    ) -> None:
+        """A 401 used to look exactly like a missing item, so the daemon
+        went on to try to create it."""
+        mock_transport.add_response(
+            "GET",
+            "/get-item-data/CEL-9999",
+            status_code=401,
+            json_data={"message": "bad key"},
+        )
+        with pytest.raises(DatalabAPIError):
+            beholder_client.fetch_item("CEL-9999")
+
+    def test_unexpected_response_shape_becomes_a_datalab_error(
+        self, beholder_client, mock_transport
+    ) -> None:
+        """`get_item` indexes into the payload unguarded; callers only
+        handle DatalabAPIError."""
+        mock_transport.add_response(
+            "GET",
+            "/get-item-data/CEL-9999",
+            status_code=200,
+            json_data={"unexpected": "shape"},
+        )
+        with pytest.raises(DatalabAPIError):
+            beholder_client.fetch_item("CEL-9999")
