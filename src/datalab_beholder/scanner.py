@@ -14,6 +14,34 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def is_future_dated(mtime: float, where: object) -> bool:
+    """True if `mtime` is ahead of wall-clock.
+
+    The warm-scan anchor is a single high-water mark over directory mtimes
+    for the whole watched path, and it is compared against directory mtimes
+    on later scans. A directory dated in the future (clock skew, or data
+    copied from a USB stick or NAS with timestamps preserved) parks the
+    anchor ahead of every real timestamp in the tree and makes every later
+    warm scan short-circuit everything until wall-clock catches up. With
+    ``cold_interval: null`` that never happens.
+
+    Such a directory is still scanned; it just never becomes the anchor, so
+    the anchor stays a timestamp the filesystem actually produced. That
+    matters beyond the skew case: ``time.time()`` and file mtimes are not
+    guaranteed to be comparable at sub-second resolution, so an anchor taken
+    from the clock can sit ahead of a file written immediately afterwards.
+    """
+    if mtime <= time.time():
+        return False
+    log.warning(
+        "%s has a modification time in the future; ignoring it when setting "
+        "the warm-scan anchor. Check the clock on this machine and on any "
+        "share it watches.",
+        where,
+    )
+    return True
+
+
 @dataclass
 class FileEntry:
     """Metadata for a single file or directory."""
@@ -333,7 +361,7 @@ def warm_scan_directory(
             log.warning("Cannot stat directory %s: %s", directory, e)
             return
 
-        if dir_mtime > max_dir_mtime:
+        if dir_mtime > max_dir_mtime and not is_future_dated(dir_mtime, directory):
             max_dir_mtime = dir_mtime
 
         try:
