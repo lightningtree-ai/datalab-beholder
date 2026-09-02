@@ -63,6 +63,7 @@ class TestBeholderDaemon:
         daemon._last_heartbeat_mono = float("-inf")
         # No dashboard in tests: it would bind a real port on every setup().
         daemon._status_server = None
+        daemon._sync_requested = threading.Event()
         config.status_port = 0
 
         return daemon
@@ -147,6 +148,56 @@ class TestBeholderDaemon:
         wp.scan.cold_interval = None
         kind = daemon._select_scan_tier(wp, time.time())
         assert kind == "warm"
+
+    def test_request_sync_now_scans_and_attaches_on_the_next_tick(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """The dashboard button, end to end.
+
+        The interesting part is the scan: a file written after the last
+        scan is not in state yet, so forcing only the attach pass would
+        report success and upload nothing.
+        """
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        # Nothing is due on its own cadence for the rest of this test.
+        for wp in config.watched_paths:
+            wp.scan.hot_interval = 3600
+            wp.scan.warm_interval = 3600
+            wp.scan.cold_interval = 3600
+        config.sync.metadata_interval = 3600
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()  # the startup scan, which leaves nothing due
+        daemon._state.mark_synced(
+            "test-data",
+            [e.path for e in daemon._state.get_pending_changes("test-data")],
+        )
+
+        (tmp_tree / "arrived-just-now.txt").write_text("data")
+        daemon.tick()
+        assert daemon._state.get_pending_changes("test-data") == []
+
+        daemon.request_sync_now()
+        daemon.tick()
+
+        pending = [e.path for e in daemon._state.get_pending_changes("test-data")]
+        assert "arrived-just-now.txt" in pending
+        assert daemon.last_attach_time is not None
+
+    def test_a_sync_request_is_consumed_once(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+
+        daemon.request_sync_now()
+        assert daemon._sync_requested.is_set()
+        daemon.tick()
+        assert not daemon._sync_requested.is_set()
 
     def test_daemon_stop(self, tmp_path: Path, tmp_tree: Path, monkeypatch) -> None:
         """Daemon should stop cleanly when stop() is called."""

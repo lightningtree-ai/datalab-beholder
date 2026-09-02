@@ -145,6 +145,25 @@ class TestBackoff:
         assert row["next_retry_at"] - row["last_error_at"] == pytest.approx(3600)
         store.close()
 
+    def test_clearing_the_backoff_makes_a_failed_file_due_again(
+        self, tmp_path: Path
+    ) -> None:
+        """What "sync now" does for the files the dashboard calls stuck."""
+        store = self._store(tmp_path)
+        store.record_attach_failure("wp", "a.ndax", "HTTP 500")
+        assert store.get_attachable("wp") == []
+
+        assert store.clear_retry_backoff("wp") == 1
+        assert [e.path for e in store.get_attachable("wp")] == ["a.ndax"]
+        # The history stays: the dashboard still says why it failed until
+        # an attempt actually succeeds.
+        row = store._conn.execute(
+            "SELECT attempts, last_error FROM files__wp"
+        ).fetchone()
+        assert row["attempts"] == 1
+        assert row["last_error"] == "HTTP 500"
+        store.close()
+
     def test_a_file_that_changed_since_failing_ignores_its_backoff(
         self, tmp_path: Path
     ) -> None:

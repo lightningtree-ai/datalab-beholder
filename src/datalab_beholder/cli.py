@@ -196,7 +196,7 @@ def scan(
     "--status-port",
     type=int,
     default=None,
-    help="Port for the read-only status dashboard on 127.0.0.1 (0 disables).",
+    help="Port for the status dashboard on 127.0.0.1 (0 disables).",
 )
 def start(
     config_path: Path | None, log_level: str | None, status_port: int | None
@@ -308,7 +308,7 @@ def dry_run(config_path: Path | None, log_level: str | None) -> None:
     "--status-port",
     type=int,
     default=None,
-    help="Port for the read-only status dashboard on 127.0.0.1 (0 disables).",
+    help="Port for the status dashboard on 127.0.0.1 (0 disables).",
 )
 def gui(
     config_path: Path | None, log_level: str | None, status_port: int | None

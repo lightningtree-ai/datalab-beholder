@@ -185,7 +185,7 @@ fields are reported as null.
 
 ## Status dashboard
 
-While the daemon runs it serves a read-only status page on
+While the daemon runs it serves a status page on
 `http://127.0.0.1:8477/`. It answers the question `datalab-beholder status`
 cannot: whether the pending files are moving or wedged, and if wedged, why.
 
@@ -195,10 +195,39 @@ that is failing with its attempt count, its error, and when it will be tried
 again. The header carries the daemon's version, host, pid, uptime and the
 time until the next upload pass.
 
+The header also carries a **Sync now** button, which asks the daemon to scan
+every watched path and run an upload pass on its next tick rather than at its
+next scheduled one. It is the button to press after fixing whatever was
+breaking an upload, and it replaces restarting the daemon, which is what
+people did for this before and which does the same full scan. Pressing it
+repeatedly costs one pass, not one per press.
+
+It also clears the retry backoff, so the files listed under "not uploading"
+are tried again on that pass instead of waiting out the delay they are
+sitting on, which reaches an hour. Their attempt counts and errors stay on
+the page until an upload actually succeeds.
+
 Set `status_port: 0` in the config, or pass `--status-port 0`, to turn it off.
 The socket is bound to `127.0.0.1` and there is no option to bind anything
 else, so it is not reachable from another machine and carries no
 authentication. It never includes an API key.
+
+Loopback does not by itself protect a route that changes something, because a
+page open in a browser on the same machine can post to `127.0.0.1` across
+origins. So a sync request must carry an `X-Beholder-Sync: 1` header, which a
+cross-origin fetch cannot send without a preflight that nothing here answers.
+A `Host` that is not `127.0.0.1` or `localhost` is refused as well, because
+the header alone does not survive a DNS rebind. A name the attacker controls,
+re-resolved to loopback, makes their page same-origin and free to set it:
+
+```
+$ curl -X POST -H 'X-Beholder-Sync: 1' http://127.0.0.1:8477/api/sync-now
+{"queued": true}
+```
+
+The button is hidden, and the route answers 404, when no daemon is attached to
+the page. That is the case for `datalab-beholder dashboard`, which reads a
+database that nothing is currently writing.
 
 Everything on the page comes from `/api/status` as JSON, which is the
 supported way to read a running beholder from anything else:
@@ -206,6 +235,7 @@ supported way to read a running beholder from anything else:
 ```
 $ curl -s http://127.0.0.1:8477/api/status
 {
+  "can_sync_now": true,
   "daemon": {
     "running": true,
     "version": "0.1.0rc6",
@@ -275,7 +305,7 @@ PyInstaller does not cross-compile — a Windows binary must be built on Windows
 | `sync` | `metadata_interval` | `1200` | Seconds between attach passes |
 | | `log_level` | `info` | Logging verbosity |
 | | `state_db` | next to package/exe | Path to the local SQLite database |
-| | `status_port` | `8477` | Port for the read-only status dashboard on `127.0.0.1`; `0` disables it |
+| | `status_port` | `8477` | Port for the status dashboard on `127.0.0.1`; `0` disables it |
 
 ## Roadmap
 

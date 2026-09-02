@@ -788,6 +788,25 @@ class StateStore:
         )
         self._conn.commit()
 
+    def clear_retry_backoff(self, watched_path_name: str) -> int:
+        """Make every backed-off pending file due for an attempt right now.
+
+        The backoff exists so a permanently stuck file does not cost a
+        full-size upload every pass. It is the wrong answer the moment a
+        human says "try again": after fixing whatever was breaking the
+        upload, the files worth retrying are exactly the ones sitting out
+        a delay of up to an hour. `attempts`, `last_error` and
+        `last_error_at` are left alone so the dashboard keeps showing what
+        went wrong until an attempt succeeds.
+        """
+        table = self._table_for(watched_path_name)
+        cursor = self._conn.execute(
+            f"UPDATE files__{table} SET next_retry_at = NULL "
+            "WHERE status IN ('new', 'modified') AND next_retry_at IS NOT NULL"
+        )
+        self._conn.commit()
+        return cursor.rowcount
+
     def write_daemon_state(self, **fields: object) -> None:
         """Upsert the single `daemon_state` row with whatever is given."""
         if not fields:

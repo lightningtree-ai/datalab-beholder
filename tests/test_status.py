@@ -162,8 +162,8 @@ class TestCollectStatus:
 
 
 class TestStatusServer:
-    def _serve(self, snapshot):
-        server = StatusServer(snapshot, port=0)
+    def _serve(self, snapshot, on_sync_request=None):
+        server = StatusServer(snapshot, port=0, on_sync_request=on_sync_request)
         assert server.start()
         # port=0 asks the OS for a free one; read back what it gave us.
         port = server._httpd.server_address[1]
@@ -243,3 +243,125 @@ class TestStatusServer:
         finally:
             server.stop()
             logging.getLogger("datalab_beholder").removeHandler(handler)
+
+
+class TestSyncNow:
+    """`POST /api/sync-now`, the one route that asks for something."""
+
+    def _serve(self, on_sync_request=None):
+        helper = TestStatusServer()
+        return helper._serve(lambda: {"daemon": {}}, on_sync_request)
+
+    def _post(self, base, headers=None):
+        request = urllib.request.Request(
+            base + "/api/sync-now",
+            data=b"",
+            headers={"X-Beholder-Sync": "1"} if headers is None else headers,
+            method="POST",
+        )
+        return urllib.request.urlopen(request, timeout=5)
+
+    def test_a_post_reaches_the_daemon(self) -> None:
+        calls = []
+        server, base = self._serve(lambda: calls.append(1))
+        try:
+            reply = self._post(base)
+            assert reply.status == 200
+            assert json.loads(reply.read())["queued"] is True
+            assert calls == [1]
+        finally:
+            server.stop()
+
+    def test_a_cross_origin_post_cannot_omit_the_header(self) -> None:
+        """The header is the whole defence: a form or a plain fetch from a
+        page on another origin cannot set it without a preflight, and
+        nothing here answers one."""
+        calls = []
+        server, base = self._serve(lambda: calls.append(1))
+        try:
+            try:
+                self._post(base, headers={})
+                raise AssertionError("expected 403")
+            except urllib.error.HTTPError as e:
+                assert e.code == 403
+            assert calls == []
+        finally:
+            server.stop()
+
+    def test_no_daemon_means_no_route_and_no_button(self) -> None:
+        """`datalab-beholder dashboard` serves a database with nothing
+        attached to ask, so the page has to know not to offer it."""
+        server, base = self._serve(None)
+        try:
+            status = json.loads(
+                urllib.request.urlopen(base + "/api/status", timeout=5).read()
+            )
+            assert status["can_sync_now"] is False
+            try:
+                self._post(base)
+                raise AssertionError("expected 404")
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
+        finally:
+            server.stop()
+
+    def test_the_page_is_told_when_it_can_sync(self) -> None:
+        server, base = self._serve(lambda: None)
+        try:
+            status = json.loads(
+                urllib.request.urlopen(base + "/api/status", timeout=5).read()
+            )
+            assert status["can_sync_now"] is True
+        finally:
+            server.stop()
+
+    def test_a_post_from_a_rebound_hostname_is_refused(self) -> None:
+        """The custom header survives a DNS rebind -- the attacker's page
+        is same-origin by then and can set it. The Host it must send is
+        the part that does not."""
+        calls = []
+        server, base = self._serve(lambda: calls.append(1))
+        try:
+            try:
+                self._post(
+                    base,
+                    headers={"X-Beholder-Sync": "1", "Host": "beholder.attacker.test"},
+                )
+                raise AssertionError("expected 403")
+            except urllib.error.HTTPError as e:
+                assert e.code == 403
+            assert calls == []
+        finally:
+            server.stop()
+
+    def test_a_post_body_does_not_cost_the_reply(self) -> None:
+        """An unread body would be closed on, which the peer sees as a
+        reset instead of the 200 we wrote."""
+        calls = []
+        server, base = self._serve(lambda: calls.append(1))
+        try:
+            request = urllib.request.Request(
+                base + "/api/sync-now",
+                data=b"x" * 200000,
+                headers={"X-Beholder-Sync": "1"},
+                method="POST",
+            )
+            reply = urllib.request.urlopen(request, timeout=5)
+            assert json.loads(reply.read())["queued"] is True
+            assert calls == [1]
+        finally:
+            server.stop()
+
+    def test_a_post_to_anything_else_404s(self) -> None:
+        server, base = self._serve(lambda: None)
+        try:
+            request = urllib.request.Request(
+                base + "/api/status", data=b"", method="POST"
+            )
+            try:
+                urllib.request.urlopen(request, timeout=5)
+                raise AssertionError("expected 404")
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
+        finally:
+            server.stop()

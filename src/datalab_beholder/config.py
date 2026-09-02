@@ -481,7 +481,7 @@ class BeholderConfig(BaseModel):
     status_port: int = Field(
         8477,
         description=(
-            "Port for the read-only status dashboard on 127.0.0.1. Set 0 to "
+            "Port for the status dashboard on 127.0.0.1. Set 0 to "
             "disable. Loopback only; it is not reachable from off the machine."
         ),
     )

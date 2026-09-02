@@ -1,8 +1,18 @@
-"""A small read-only HTTP view of the daemon's state.
+"""A small HTTP view of the daemon's state, plus one button.
 
-Two routes: `/` serves the page, `/api/status` serves the JSON the page
-polls. That JSON is the whole integration surface — anything that wants to
-watch a beholder reads it rather than parsing `beholder.log`.
+Three routes: `/` serves the page, `/api/status` serves the JSON the page
+polls, and `POST /api/sync-now` asks a running daemon to scan and upload
+now instead of at its next scheduled pass. That JSON is the whole
+integration surface — anything that wants to watch a beholder reads it
+rather than parsing `beholder.log`.
+
+`/api/sync-now` is the only route that changes anything, and the loopback
+bind does not protect it by itself: a page open in a browser on this
+machine can post to 127.0.0.1 across origins. So it requires an
+`X-Beholder-Sync: 1` header, which a cross-origin fetch cannot send
+without a preflight, and nothing here answers a preflight. What it costs
+if someone gets through anyway is one scan, because the daemon collapses
+repeated requests into a single pass.
 
 Bound to loopback only. `DESIGN.md` describes the instrument-PC network
 posture as outbound HTTPS only, and the point of that is that these
@@ -58,6 +68,11 @@ header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4
 .pill.ok{background:var(--okbg);color:var(--ok)}
 .pill.warn{background:var(--warnbg);color:var(--warn)}
 .pill.bad{background:var(--badbg);color:var(--bad)}
+button{font:inherit;font-size:12.5px;font-weight:600;color:var(--ink);
+ background:var(--card);border:1px solid var(--line);border-radius:999px;
+ padding:3px 12px;cursor:pointer}
+button:hover:enabled{border-color:var(--dim)}
+button:disabled{color:var(--dim);cursor:default}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
  padding:16px 18px;margin-bottom:16px}
 .cardhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:2px}
@@ -84,7 +99,8 @@ tr:last-child td{border-bottom:0}
 .banner{background:var(--badbg);color:var(--bad);border-radius:8px;
  padding:10px 14px;margin-bottom:16px;font-size:13px}
 </style></head><body><div class="wrap">
-<header><h1>beholder</h1><span id="state" class="pill">connecting</span></header>
+<header><h1>beholder</h1><span id="state" class="pill">connecting</span>
+<button id="sync" hidden>Sync now</button></header>
 <div class="sub" id="meta"></div>
 <div id="body"></div>
 <div class="sub" id="foot"></div>
@@ -156,10 +172,13 @@ function renderPath(p){
     h += `<div class="sec">Not uploading</div><div class="scroll"><table>
       <tr><th>File</th><th>Attempts</th><th>Last failure</th>
       <th>Next try</th><th>Error</th></tr>`;
+    // No deadline on a file that is still failing means its backoff was
+    // cleared, which "Sync now" does, so it goes on the next pass. "never"
+    // is what the shared formatter would say, and it is the wrong answer.
     for(const f of p.problems){
       h += `<tr><td class="mono">${esc(f.path)}</td>
         <td class="mono">${f.attempts}</td><td>${T(f.last_error_at)}</td>
-        <td>${T(f.next_retry_at)}</td>
+        <td>${f.next_retry_at ? T(f.next_retry_at) : "next pass"}</td>
         <td class="err mono">${esc(f.last_error)}</td></tr>`;
     }
     h += `</table></div>`;
@@ -208,9 +227,32 @@ function render(s){
   const paths = s.watched_paths || [];
   h += paths.length ? paths.map(renderPath).join("")
      : `<div class="card empty">No watched paths in this state database.</div>`;
+  // Hidden unless a daemon is attached to this server and can act on it.
+  $("sync").hidden = !s.can_sync_now;
   $("body").innerHTML = h;
   $("foot").textContent = "updated " + new Date().toLocaleTimeString();
 }
+
+// The one control on the page. The custom header is what keeps another
+// origin from posting this; see the module docstring.
+async function requestSync(){
+  const b = $("sync");
+  b.disabled = true;
+  b.textContent = "requesting";
+  let wait = 3000;
+  try{
+    const r = await fetch("api/sync-now",
+      {method:"POST", headers:{"X-Beholder-Sync":"1"}});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    b.textContent = "requested";
+    poll();
+  }catch(e){
+    b.textContent = "request failed";
+    wait = 8000;
+  }
+  setTimeout(() => { b.textContent = "Sync now"; b.disabled = false; }, wait);
+}
+$("sync").addEventListener("click", requestSync);
 
 async function poll(){
   try{
@@ -227,6 +269,18 @@ setInterval(poll, 5000);
 """
 
 
+def _is_loopback_host(host: str | None) -> bool:
+    """Whether a request's `Host` names this machine over loopback.
+
+    Missing is allowed: HTTP/1.0 clients (curl -0, older scripts) send no
+    Host at all, and the socket is bound to 127.0.0.1 regardless.
+    """
+    if not host:
+        return True
+    name = host.rsplit(":", 1)[0] if not host.endswith("]") else host
+    return name.strip("[]").lower() in {"127.0.0.1", "localhost", "::1"}
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "beholder-status"
 
@@ -236,11 +290,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
         elif route == "/api/status":
             failure: Exception | None = None
+            can_sync = self._request_sync is not None
             try:
-                body = json.dumps(self.server.snapshot(), default=str)  # type: ignore[attr-defined]
+                snapshot = self.server.snapshot()  # type: ignore[attr-defined]
+                # Whether a sync can be asked for is a fact about this
+                # server rather than about the database status.py reads,
+                # so it is added here and not in the snapshot.
+                snapshot["can_sync_now"] = can_sync
+                body = json.dumps(snapshot, default=str)
             except Exception as e:  # pragma: no cover - defensive
                 failure = e
-                body = json.dumps({"error": f"{type(e).__name__}: {e}"})
+                body = json.dumps(
+                    {"error": f"{type(e).__name__}: {e}", "can_sync_now": can_sync}
+                )
             self._send(200, "application/json", body.encode("utf-8"))
             if failure is not None:  # pragma: no cover - defensive
                 # After the reply, not before. Logging runs arbitrary handlers
@@ -249,6 +311,65 @@ class _Handler(BaseHTTPRequestHandler):
                 log.error("status snapshot failed", exc_info=failure)
         else:
             self._send(404, "text/plain; charset=utf-8", b"not found\n")
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
+        # Read the body before replying, whatever the route turns out to
+        # be. Closing a socket that still has unread bytes in its receive
+        # buffer sends an RST, and the client then sees a reset connection
+        # instead of the answer we just wrote.
+        self._drain_body()
+        route = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if route != "/api/sync-now":
+            self._send(404, "text/plain; charset=utf-8", b"not found\n")
+            return
+
+        request_sync = self._request_sync
+        if request_sync is None:
+            self._json(404, {"error": "no daemon is attached to this dashboard"})
+            return
+        if self.headers.get("X-Beholder-Sync") != "1":
+            self._json(403, {"error": "missing X-Beholder-Sync header"})
+            return
+        # The custom header stops an ordinary cross-origin post, but not a
+        # DNS rebind: a name the attacker controls, re-resolved to
+        # 127.0.0.1, makes their page same-origin with us and free to set
+        # any header it likes. The one thing that attack cannot change is
+        # the Host it has to send, so require a loopback one.
+        if not _is_loopback_host(self.headers.get("Host")):
+            self._json(403, {"error": "unexpected Host header"})
+            return
+
+        failure: Exception | None = None
+        try:
+            request_sync()
+        except Exception as e:  # pragma: no cover - defensive
+            failure = e
+        if failure is None:
+            self._json(200, {"queued": True})
+        else:  # pragma: no cover - defensive
+            # Reply first, log second, for the reason do_GET gives.
+            self._json(500, {"error": f"{type(failure).__name__}: {failure}"})
+            log.error("sync request failed", exc_info=failure)
+
+    @property
+    def _request_sync(self) -> Callable[[], None] | None:
+        """The daemon's hook, or None when no daemon is attached."""
+        return getattr(self.server, "request_sync", None)
+
+    def _drain_body(self) -> None:
+        """Consume the request body, if any, so the socket is clean."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        while length > 0:
+            chunk = self.rfile.read(min(length, 65536))
+            if not chunk:
+                break
+            length -= len(chunk)
+
+    def _json(self, code: int, payload: dict[str, Any]) -> None:
+        self._send(code, "application/json", json.dumps(payload).encode("utf-8"))
 
     def _send(self, code: int, content_type: str, body: bytes) -> None:
         self.send_response(code)
@@ -270,12 +391,22 @@ class StatusServer:
     The snapshot callable must open its own database connection: sqlite3
     connections belong to the thread that created them, and this runs off
     the daemon's thread.
+
+    ``on_sync_request`` is the daemon's hook for `POST /api/sync-now`, and
+    is called on a server thread under the same rule: it must not touch
+    SQLite or the daemon's own bookkeeping, only ask for work. Left as
+    None, which is the case for the standalone `dashboard` command because
+    it has no daemon to ask, the route 404s and the page hides the button.
     """
 
     def __init__(
-        self, snapshot: Callable[[], dict[str, Any]], port: int = DEFAULT_PORT
+        self,
+        snapshot: Callable[[], dict[str, Any]],
+        port: int = DEFAULT_PORT,
+        on_sync_request: Callable[[], None] | None = None,
     ) -> None:
         self._snapshot = snapshot
+        self._on_sync_request = on_sync_request
         self._port = port
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -303,6 +434,7 @@ class StatusServer:
             )
             return False
         httpd.snapshot = self._snapshot  # type: ignore[attr-defined]
+        httpd.request_sync = self._on_sync_request  # type: ignore[attr-defined]
         httpd.daemon_threads = True
         self._httpd = httpd
         if background:

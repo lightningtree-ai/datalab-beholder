@@ -85,6 +85,8 @@ class BeholderDaemon:
         self._last_heartbeat_mono: float = float("-inf")
         # --- lightningtree fork: status dashboard ---
         self._status_server: Any = None
+        # Set from the dashboard's threads, read and cleared on ours.
+        self._sync_requested = threading.Event()
         # --- end fork ---
 
     @property
@@ -227,6 +229,32 @@ class BeholderDaemon:
         now_wall = time.time()
         failed = False
 
+        # --- lightningtree fork: status dashboard ---
+        # A "sync now" from the dashboard is read here rather than acted
+        # on by the server's thread, so that all the scanning, SQLite and
+        # upload work stays on this one. However many times the button was
+        # pressed, what arrives is a single forced pass.
+        forced = self._sync_requested.is_set()
+        if forced:
+            self._sync_requested.clear()
+            # Scan before attaching: a file written since the last scan is
+            # not in state yet, so an attach pass on its own would find
+            # nothing new to send. This is the marker the restart rescan
+            # uses, and `_select_scan_tier` already reads it.
+            self._pending_full_scan.update(wp.name for wp in self._config.watched_paths)
+            # Clear the retry backoff too. The files a human presses this
+            # for are the ones the dashboard lists as not uploading, and
+            # those are sitting out a delay of up to an hour -- without
+            # this the forced pass walks straight past every one of them
+            # and the button appears to do nothing.
+            for wp in self._config.watched_paths:
+                try:
+                    self._state.clear_retry_backoff(wp.name)
+                except Exception:
+                    log.debug("could not clear backoff for %s", wp.name, exc_info=True)
+            log.info("Sync requested from the dashboard")
+        # --- end fork ---
+
         for wp in self._config.watched_paths:
             try:
                 kind = self._select_scan_tier(wp, now_wall)
@@ -246,7 +274,9 @@ class BeholderDaemon:
                 log.exception("Error running %s scan for %s", kind, wp.name)
                 failed = True
 
-        if now_mono - self._last_attach_mono >= self._config.sync.metadata_interval:
+        # `forced` is the fork's dashboard sync request; see above.
+        due = now_mono - self._last_attach_mono >= self._config.sync.metadata_interval
+        if forced or due:
             self.sync_status = "attaching"
             try:
                 self._attach_matched_files()
@@ -329,9 +359,24 @@ class BeholderDaemon:
         from datalab_beholder.server import StatusServer
         from datalab_beholder.status import collect_status
 
-        server = StatusServer(lambda: collect_status(self._config), port=int(port))
+        server = StatusServer(
+            lambda: collect_status(self._config),
+            port=int(port),
+            on_sync_request=self.request_sync_now,
+        )
         if server.start():
             self._status_server = server
+
+    def request_sync_now(self) -> None:
+        """Ask the loop to scan every watched path and run an upload pass
+        on its next tick, rather than waiting out the configured intervals.
+
+        Called from one of the dashboard's threads, so all it does is set
+        an event: `tick` picks it up within a second and does the work on
+        the daemon's own thread. Requests made before that tick collapse
+        into one pass, so holding the button down costs one scan.
+        """
+        self._sync_requested.set()
 
     # --- end fork ---
 
