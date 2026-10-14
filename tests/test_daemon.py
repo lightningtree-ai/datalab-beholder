@@ -179,6 +179,9 @@ class TestBeholderDaemon:
         daemon.tick()
         assert daemon._state.get_pending_changes("test-data") == []
 
+        # The startup tick already set this; clear it so the assertion
+        # below can only pass if the forced tick ran an attach pass.
+        daemon.last_attach_time = None
         daemon.request_sync_now()
         daemon.tick()
 

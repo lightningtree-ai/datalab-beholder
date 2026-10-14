@@ -251,7 +251,7 @@ class BeholderDaemon:
                 try:
                     self._state.clear_retry_backoff(wp.name)
                 except Exception:
-                    log.debug("could not clear backoff for %s", wp.name, exc_info=True)
+                    log.exception("Could not clear the retry backoff for %s", wp.name)
             log.info("Sync requested from the dashboard")
         # --- end fork ---
 
@@ -374,7 +374,7 @@ class BeholderDaemon:
         Called from one of the dashboard's threads, so all it does is set
         an event: `tick` picks it up within a second and does the work on
         the daemon's own thread. Requests made before that tick collapse
-        into one pass, so holding the button down costs one scan.
+        into one pass. A request made after it starts another full scan.
         """
         self._sync_requested.set()
 

@@ -11,8 +11,9 @@ bind does not protect it by itself: a page open in a browser on this
 machine can post to 127.0.0.1 across origins. So it requires an
 `X-Beholder-Sync: 1` header, which a cross-origin fetch cannot send
 without a preflight, and nothing here answers a preflight. What it costs
-if someone gets through anyway is one scan, because the daemon collapses
-repeated requests into a single pass.
+if someone gets through anyway is a full scan and upload pass per daemon
+tick, because requests that arrive before a tick collapse into one pass
+but each tick starts a new one.
 
 Bound to loopback only. `DESIGN.md` describes the instrument-PC network
 posture as outbound HTTPS only, and the point of that is that these
@@ -283,9 +284,16 @@ def _is_loopback_host(host: str | None) -> bool:
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "beholder-status"
+    # A client that stalls, or sends a Content-Length larger than its body,
+    # would otherwise hold a server thread forever in `_drain_body`.
+    timeout = 10
+
+    @property
+    def _route(self) -> str:
+        return self.path.split("?", 1)[0].rstrip("/") or "/"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
-        route = self.path.split("?", 1)[0].rstrip("/") or "/"
+        route = self._route
         if route == "/":
             self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
         elif route == "/api/status":
@@ -318,8 +326,7 @@ class _Handler(BaseHTTPRequestHandler):
         # buffer sends an RST, and the client then sees a reset connection
         # instead of the answer we just wrote.
         self._drain_body()
-        route = self.path.split("?", 1)[0].rstrip("/") or "/"
-        if route != "/api/sync-now":
+        if self._route != "/api/sync-now":
             self._send(404, "text/plain; charset=utf-8", b"not found\n")
             return
 

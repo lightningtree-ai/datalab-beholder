@@ -199,8 +199,9 @@ The header also carries a **Sync now** button, which asks the daemon to scan
 every watched path and run an upload pass on its next tick rather than at its
 next scheduled one. It is the button to press after fixing whatever was
 breaking an upload, and it replaces restarting the daemon, which is what
-people did for this before and which does the same full scan. Pressing it
-repeatedly costs one pass, not one per press.
+people did for this before and which does the same full scan. Presses made
+while a pass is waiting to start collapse into that one pass. A press after
+it starts queues one more.
 
 It also clears the retry backoff, so the files listed under "not uploading"
 are tried again on that pass instead of waiting out the delay they are
